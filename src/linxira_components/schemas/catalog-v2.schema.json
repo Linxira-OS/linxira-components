@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Linxira software catalog v2",
+  "type": "object",
+  "required": ["catalogVersion", "release", "reviewed", "sources", "categories", "profiles"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {"type": "string"},
+    "catalogVersion": {"const": 2},
+    "release": {"type": "string", "pattern": "^[0-9]{4}\\.[0-9]{2}$"},
+    "reviewed": {"type": "string", "format": "date"},
+    "sources": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/source"}},
+    "categories": {"type": "array", "items": {"$ref": "#/$defs/category"}},
+    "profiles": {"type": "array", "items": {"$ref": "#/$defs/profile"}}
+  },
+  "$defs": {
+    "localized": {"type": "object", "required": ["en", "zh_CN"], "additionalProperties": {"type": "string", "minLength": 1}},
+    "category": {"type": "object", "required": ["id", "name"], "additionalProperties": false, "properties": {"id": {"type": "string", "pattern": "^[a-z0-9-]+$"}, "name": {"$ref": "#/$defs/localized"}}},
+    "source": {"type": "object", "required": ["id", "kind", "trust", "name"], "additionalProperties": false, "properties": {"id": {"type": "string", "pattern": "^[a-z0-9-]+$"}, "kind": {"enum": ["pacman", "flatpak", "container"]}, "trust": {"enum": ["distribution", "verified-third-party", "user-opt-in"]}, "name": {"$ref": "#/$defs/localized"}}},
+    "profile": {
+      "type": "object",
+      "required": ["id", "name", "description", "categories", "source", "packages", "installer", "availability", "review", "presentation"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+        "name": {"$ref": "#/$defs/localized"},
+        "description": {"$ref": "#/$defs/localized"},
+        "categories": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "source": {"const": "arch"},
+        "packages": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9@._+-]+$"}},
+        "installer": {"type": "boolean"},
+        "availability": {"type": "object", "required": ["architectures", "networkRequired"], "additionalProperties": false, "properties": {"architectures": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}}, "networkRequired": {"type": "boolean"}}},
+        "review": {"type": "object", "required": ["status", "date"], "additionalProperties": false, "properties": {"status": {"const": "reviewed"}, "date": {"type": "string", "format": "date"}}},
+        "presentation": {"type": "object", "required": ["recommended", "order"], "additionalProperties": false, "properties": {"recommended": {"type": "boolean"}, "order": {"type": "integer", "minimum": 0}}}
+      }
+    }
+  }
+}

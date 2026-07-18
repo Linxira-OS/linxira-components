@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://linxira.org/schemas/components/request-plan-v1.schema.json",
+  "title": "Linxira component request plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "id", "createdAt", "catalogSha256", "architecture",
+    "profileIds", "directPackageTargets", "networkRequired",
+    "systemUpgradeRequired", "digest"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "org.linxira.components.request-plan.v1"},
+    "id": {"type": "string", "format": "uuid"},
+    "createdAt": {"$ref": "#/$defs/utcTimestamp"},
+    "catalogSha256": {"$ref": "#/$defs/sha256"},
+    "architecture": {"type": "string", "minLength": 1},
+    "profileIds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9-]+$"}},
+    "directPackageTargets": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9@._+-]+$"}},
+    "networkRequired": {"type": "boolean"},
+    "systemUpgradeRequired": {"const": false},
+    "digest": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "utcTimestamp": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"}
+  }
+}
