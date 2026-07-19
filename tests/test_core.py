@@ -18,6 +18,7 @@ ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from linxira_components.catalog import load_catalog  # noqa: E402
+from linxira_components.backend import apply_transaction  # noqa: E402
 from linxira_components.cli import main  # noqa: E402
 from linxira_components.errors import (  # noqa: E402
     CatalogDriftError,
@@ -84,6 +85,20 @@ def catalog_document() -> dict[str, object]:
                 "name": {"en": "Development", "zh_CN": "Development"},
             }
         ],
+        "applications": [
+            {
+                "id": "haruna",
+                "name": {"en": "Haruna", "zh_CN": "Haruna"},
+                "description": {"en": "Media player", "zh_CN": "媒体播放器"},
+                "categories": ["development"],
+                "source": "arch",
+                "packages": ["haruna"],
+                "installer": True,
+                "availability": {"architectures": ["x86_64"], "networkRequired": True},
+                "review": {"status": "reviewed", "date": "2026-07-19"},
+                "presentation": {"recommended": True, "defaultSelected": True, "order": 10},
+            }
+        ],
         "profiles": [
             profile("developer", ["python", "git", "shared-tool"], 10),
             profile("science", ["shared-tool", "python-numpy"], 20, network=False),
@@ -148,6 +163,22 @@ class CatalogTests(CatalogFixture):
         with self.assertRaisesRegex(CatalogError, "source must be"):
             self.load()
 
+    def test_catalog_accepts_non_arch_sources_not_used_by_profiles(self) -> None:
+        document = catalog_document()
+        document["sources"].append(  # type: ignore[union-attr]
+            {
+                "id": "bioconda",
+                "kind": "conda",
+                "trust": "verified-third-party",
+                "name": {"en": "Bioconda", "zh_CN": "Bioconda"},
+            }
+        )
+        document["applications"] = []
+        document["desktopBundles"] = []
+        document["profiles"][0]["applications"] = ["git"]  # type: ignore[index]
+        self.write_catalog(document)
+        self.assertEqual(len(self.load().profiles), 2)
+
     def test_architecture_mismatch_is_rejected(self) -> None:
         with self.assertRaisesRegex(CatalogError, "not available"):
             load_catalog(self.catalog_path, "aarch64")
@@ -196,6 +227,21 @@ class PlanTests(CatalogFixture):
         catalog = self.load()
         with self.assertRaisesRegex(ValidationError, "architecture differs"):
             create_request_plan(catalog, ["developer"], "aarch64")
+
+    def test_application_only_plan_is_catalog_bound(self) -> None:
+        catalog = self.load()
+        plan = create_request_plan(
+            catalog,
+            [],
+            "x86_64",
+            application_ids=["haruna"],
+            clock=lambda: NOW,
+        )
+        self.assertEqual(plan["profileIds"], [])
+        self.assertEqual(plan["applicationIds"], ["haruna"])
+        self.assertEqual(plan["directPackageTargets"], ["haruna"])
+        confirmation = create_confirmation(plan, catalog, clock=lambda: NOW)
+        self.assertEqual(confirmation["applicationIds"], ["haruna"])
 
     def test_digest_tamper_is_rejected(self) -> None:
         catalog, plan = self.create_plan()
@@ -286,22 +332,56 @@ class ReceiptTests(unittest.TestCase):
 
 
 class SafetyTests(CatalogFixture):
-    def test_apply_returns_not_implemented_without_process_execution(self) -> None:
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        with (
-            mock.patch.object(subprocess, "run") as run,
-            mock.patch.object(subprocess, "Popen") as popen,
-            mock.patch("os.system") as system,
-            redirect_stdout(stdout),
-            redirect_stderr(stderr),
-        ):
-            result = main(["apply", "--confirmation", "untrusted.json"])
-        self.assertEqual(result, 3)
-        self.assertEqual(json.loads(stderr.getvalue())["error"], "NOT_IMPLEMENTED")
-        run.assert_not_called()
-        popen.assert_not_called()
-        system.assert_not_called()
+    def confirmed(self):
+        catalog = self.load()
+        plan = create_request_plan(catalog, ["developer", "science"], "x86_64", clock=lambda: NOW)
+        return catalog, create_confirmation(plan, catalog, clock=lambda: NOW)
+
+    def test_apply_requires_root_before_process_execution(self) -> None:
+        _, confirmation = self.confirmed()
+        runner = mock.Mock()
+        with self.assertRaisesRegex(ValidationError, "run as root"):
+            apply_transaction(
+                confirmation,
+                receipt_dir=self.directory / "receipts",
+                catalog_path=self.catalog_path,
+                effective_uid=1000,
+                runner=runner,
+            )
+        runner.assert_not_called()
+
+    def test_apply_runs_fixed_pacman_argv_and_persists_succeeded_receipt(self) -> None:
+        _, confirmation = self.confirmed()
+        runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "installed", ""))
+        receipt = apply_transaction(
+            confirmation,
+            receipt_dir=self.directory / "receipts",
+            catalog_path=self.catalog_path,
+            effective_uid=0,
+            runner=runner,
+        )
+        self.assertEqual(receipt["status"], "succeeded")
+        command = runner.call_args.args[0]
+        self.assertEqual(command[:5], ["pacman", "--sync", "--needed", "--noconfirm", "--"])
+        self.assertEqual(command[5:], ["git", "python", "python-numpy", "shared-tool"])
+        self.assertEqual(runner.call_args.kwargs["env"], {"PATH": "/usr/bin:/usr/sbin", "LC_ALL": "C"})
+        persisted = list((self.directory / "receipts").glob("*.json"))
+        self.assertEqual(len(persisted), 1)
+        self.assertEqual(json.loads(persisted[0].read_text(encoding="utf-8"))["status"], "succeeded")
+
+    def test_apply_records_failed_receipt_when_pacman_fails(self) -> None:
+        _, confirmation = self.confirmed()
+        runner = mock.Mock(return_value=subprocess.CompletedProcess([], 1, "", "package error"))
+        with self.assertRaisesRegex(Exception, "exit code 1"):
+            apply_transaction(
+                confirmation,
+                receipt_dir=self.directory / "receipts",
+                catalog_path=self.catalog_path,
+                effective_uid=0,
+                runner=runner,
+            )
+        persisted = list((self.directory / "receipts").glob("*.json"))
+        self.assertEqual(json.loads(persisted[0].read_text(encoding="utf-8"))["status"], "failed")
 
     def test_output_is_confined_to_plain_filename(self) -> None:
         with self.assertRaises(UnsafePathError):

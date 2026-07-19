@@ -8,14 +8,14 @@ from typing import Sequence, TextIO
 
 from .backend import apply_transaction
 from .catalog import load_catalog
-from .errors import ComponentsError, NotImplementedTransactionError
+from .errors import ComponentsError
 from .jsonio import atomic_write_json, load_strict
 from .models import create_confirmation, create_request_plan
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="linxira-components")
-    parser.add_argument("--version", action="version", version="%(prog)s 0.1.0")
+    parser.add_argument("--version", action="version", version="%(prog)s 0.2.0")
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     list_parser = subcommands.add_parser("list", help="list catalog profiles")
@@ -26,7 +26,8 @@ def _parser() -> argparse.ArgumentParser:
     plan_parser = subcommands.add_parser("plan", help="create a canonical request plan")
     plan_parser.add_argument("--catalog", type=Path, required=True)
     plan_parser.add_argument("--arch", default="x86_64")
-    plan_parser.add_argument("--profile", action="append", required=True, dest="profiles")
+    plan_parser.add_argument("--profile", action="append", default=[], dest="profiles")
+    plan_parser.add_argument("--application", action="append", default=[], dest="applications")
     plan_parser.add_argument("--output-dir", type=Path, required=True)
     plan_parser.add_argument("--output", default="request-plan.json")
 
@@ -37,8 +38,9 @@ def _parser() -> argparse.ArgumentParser:
     confirm_parser.add_argument("--output-dir", type=Path, required=True)
     confirm_parser.add_argument("--output", default="confirmation.json")
 
-    apply_parser = subcommands.add_parser("apply", help="reserved transaction entry point")
-    apply_parser.add_argument("--confirmation", type=Path)
+    apply_parser = subcommands.add_parser("apply", help="apply a confirmed Arch transaction as root")
+    apply_parser.add_argument("--confirmation", type=Path, required=True)
+    apply_parser.add_argument("--receipt-dir", type=Path, default=None)
     return parser
 
 
@@ -70,7 +72,12 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.command == "plan":
         catalog = load_catalog(args.catalog, args.arch)
-        plan = create_request_plan(catalog, args.profiles, args.arch)
+        plan = create_request_plan(
+            catalog,
+            args.profiles,
+            args.arch,
+            application_ids=args.applications,
+        )
         path = atomic_write_json(args.output_dir, args.output, plan)
         _print_json({"path": str(path), "digest": plan["digest"]})
         return 0
@@ -84,7 +91,13 @@ def _run(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "apply":
-        apply_transaction(args.confirmation)
+        confirmation = load_strict(args.confirmation)
+        receipt = apply_transaction(
+            confirmation,
+            **({"receipt_dir": args.receipt_dir} if args.receipt_dir is not None else {}),
+        )
+        _print_json(receipt)
+        return 0
     raise AssertionError("unreachable command")
 
 
@@ -93,7 +106,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run(_parser().parse_args(argv))
     except ComponentsError as exc:
         _print_json({"error": exc.code, "message": str(exc)}, stream=sys.stderr)
-        return 3 if isinstance(exc, NotImplementedTransactionError) else 2
+        return 3 if exc.code == "TRANSACTION_FAILED" else 2
 
 
 if __name__ == "__main__":

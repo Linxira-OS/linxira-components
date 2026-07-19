@@ -1,9 +1,9 @@
 # Linxira Components
 
-`linxira-components` is the Phase 1 component-management core for Linxira OS.
-It validates catalog v2, lists profiles, creates deterministic-content request
-plans, confirms unchanged plans, and models transaction receipts. It does not
-install, remove, upgrade, or invoke packages.
+`linxira-components` is the catalog-bound Arch package transaction backend for
+Linxira OS. It validates catalog v2, creates deterministic request plans for
+profiles and individual applications, confirms unchanged plans, applies a
+root-only pacman transaction, and persists durable receipts.
 
 ## Safety boundary
 
@@ -17,11 +17,17 @@ install, remove, upgrade, or invoke packages.
 - Writes require an existing explicit output directory and one plain filename.
   Symlinked directories and targets are rejected; files use temporary-file,
   fsync, and atomic replace semantics.
-- `apply` always returns `NOT_IMPLEMENTED` with exit status 3. This package does
-  not import or call subprocess, shells, privilege tools, or package managers.
+- `apply` reloads the fixed system catalog, rejects catalog drift, re-expands
+  profile and application IDs, and compares the exact package target set.
+- The backend must run as root. It invokes pacman once with a fixed argument
+  vector and never uses a shell, client repository settings, removals, arbitrary
+  paths, hooks, environment variables, or system upgrades.
+- Receipts are written atomically under
+  `/var/lib/linxira/components/receipts` before and after each state transition.
 
-The API XML and Polkit policy in this repository are review drafts. Packaging
-does not install or enable them.
+The API XML and Polkit policy remain review drafts. Phase 1 uses an explicit
+`pkexec linxira-components apply` boundary owned by Package Center; packaging
+does not install a D-Bus service.
 
 ## CLI
 
@@ -31,12 +37,13 @@ Run directly from a checkout on Python 3.11 or newer:
 set PYTHONPATH=src
 python -m linxira_components list --catalog catalog-v2.json
 python -m linxira_components plan --catalog catalog-v2.json --profile developer --output-dir out
+python -m linxira_components plan --catalog catalog-v2.json --application haruna --output-dir out
 python -m linxira_components confirm --catalog catalog-v2.json --plan out/request-plan.json --output-dir out
 python -m linxira_components apply --confirmation out/confirmation.json
 ```
 
-`--profile` may be repeated. Profile IDs and direct package targets are
-de-duplicated and sorted. `systemUpgradeRequired` is always `false` in Phase 1.
+`--profile` and `--application` may be repeated. IDs and direct package targets
+are de-duplicated and sorted. `systemUpgradeRequired` is always `false`.
 
 ## Development
 

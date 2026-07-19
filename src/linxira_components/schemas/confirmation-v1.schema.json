@@ -4,7 +4,7 @@
   "title": "Linxira component confirmation v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "id", "confirmedAt", "requestPlanId", "planDigest", "catalogSha256", "digest"],
+  "required": ["schemaVersion", "id", "confirmedAt", "requestPlanId", "planDigest", "catalogSha256", "architecture", "profileIds", "applicationIds", "directPackageTargets", "networkRequired", "systemUpgradeRequired", "digest"],
   "properties": {
     "schemaVersion": {"const": "org.linxira.components.confirmation.v1"},
     "id": {"type": "string", "format": "uuid"},
@@ -12,6 +12,12 @@
     "requestPlanId": {"type": "string", "format": "uuid"},
     "planDigest": {"$ref": "#/$defs/sha256"},
     "catalogSha256": {"$ref": "#/$defs/sha256"},
+    "architecture": {"type": "string", "pattern": "^[A-Za-z0-9_+-]+$"},
+    "profileIds": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9-]+$"}},
+    "applicationIds": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9-]+$"}},
+    "directPackageTargets": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9@._+-]+$"}},
+    "networkRequired": {"type": "boolean"},
+    "systemUpgradeRequired": {"const": false},
     "digest": {"$ref": "#/$defs/sha256"}
   },
   "$defs": {

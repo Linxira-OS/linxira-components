@@ -28,12 +28,23 @@ class Profile:
 
 
 @dataclass(frozen=True)
+class Application:
+    id: str
+    names: dict[str, str]
+    packages: tuple[str, ...]
+    architectures: tuple[str, ...]
+    network_required: bool
+    order: int
+
+
+@dataclass(frozen=True)
 class Catalog:
     path: Path
     sha256: str
     release: str
     architecture: str
     profiles: tuple[Profile, ...]
+    applications: tuple[Application, ...]
 
     def by_id(self) -> dict[str, Profile]:
         return {profile.id: profile for profile in self.profiles}
@@ -43,9 +54,17 @@ class Catalog:
         unknown = sorted(set(profile_ids) - profiles.keys())
         if unknown:
             raise UnknownProfileError(f"unknown profile(s): {', '.join(unknown)}")
-        if not profile_ids:
-            raise UnknownProfileError("at least one profile ID is required")
         return tuple(profiles[profile_id] for profile_id in sorted(set(profile_ids)))
+
+    def applications_by_id(self) -> dict[str, Application]:
+        return {application.id: application for application in self.applications}
+
+    def select_applications(self, application_ids: list[str] | tuple[str, ...]) -> tuple[Application, ...]:
+        applications = self.applications_by_id()
+        unknown = sorted(set(application_ids) - applications.keys())
+        if unknown:
+            raise UnknownProfileError(f"unknown or unreviewed application(s): {', '.join(unknown)}")
+        return tuple(applications[application_id] for application_id in sorted(set(application_ids)))
 
 
 def _object(
@@ -130,7 +149,7 @@ def load_catalog(path: str | Path, architecture: str) -> Catalog:
         root,
         "catalog",
         {"catalogVersion", "release", "reviewed", "sources", "categories", "profiles"},
-        {"$schema"},
+        {"$schema", "applications", "desktopBundles"},
     )
     if root["catalogVersion"] != 2 or isinstance(root["catalogVersion"], bool):
         raise CatalogError("catalogVersion must be integer 2")
@@ -143,7 +162,10 @@ def load_catalog(path: str | Path, architecture: str) -> Catalog:
     for index, item in enumerate(_array(root["sources"], "catalog.sources", nonempty=True)):
         source = _object(item, f"source[{index}]", {"id", "kind", "trust", "name"})
         _string(source["id"], f"source[{index}].id", ID_RE)
-        if source["kind"] not in {"pacman", "flatpak", "container"}:
+        if source["kind"] not in {
+            "pacman", "aur", "flatpak", "pypi", "npm", "conda",
+            "cargo", "go", "oci", "container",
+        }:
             raise CatalogError(f"invalid source[{index}].kind")
         if source["trust"] not in {"distribution", "verified-third-party", "user-opt-in"}:
             raise CatalogError(f"invalid source[{index}].trust")
@@ -162,6 +184,49 @@ def load_catalog(path: str | Path, architecture: str) -> Catalog:
     _unique_ids(categories, "category")
     category_ids = {category["id"] for category in categories}
 
+    applications: list[Application] = []
+    raw_applications: list[dict[str, Any]] = []
+    application_fields = {
+        "id", "name", "description", "categories", "source", "packages",
+        "installer", "availability", "review", "presentation",
+    }
+    for index, item in enumerate(_array(root.get("applications", []), "catalog.applications")):
+        context = f"application[{index}]"
+        application = _object(item, context, application_fields)
+        application_id = _string(application["id"], f"{context}.id", ID_RE)
+        names = _localized(application["name"], f"{context}.name")
+        _localized(application["description"], f"{context}.description")
+        categories_for_application = _unique_strings(application["categories"], f"{context}.categories")
+        missing_categories = set(categories_for_application) - category_ids
+        if missing_categories:
+            raise CatalogError(f"{context} references unknown categories: {', '.join(sorted(missing_categories))}")
+        source = _string(application["source"], f"{context}.source", ID_RE)
+        if source not in source_ids:
+            raise CatalogError(f"{context} references unknown source: {source}")
+        packages = _unique_strings(application["packages"], f"{context}.packages", pattern=PACKAGE_RE)
+        installer = _boolean(application["installer"], f"{context}.installer")
+        availability = _object(application["availability"], f"{context}.availability", {"architectures", "networkRequired"})
+        architectures = _unique_strings(
+            availability["architectures"],
+            f"{context}.availability.architectures",
+            pattern=ARCHITECTURE_RE,
+        )
+        network_required = _boolean(availability["networkRequired"], f"{context}.availability.networkRequired")
+        review = _object(application["review"], f"{context}.review", {"status", "date"})
+        if review["status"] not in {"reviewed", "needs-vm-test", "source-review"}:
+            raise CatalogError(f"invalid {context}.review.status")
+        _iso_date(review["date"], f"{context}.review.date")
+        presentation = _object(application["presentation"], f"{context}.presentation", {"recommended", "defaultSelected", "order"})
+        _boolean(presentation["recommended"], f"{context}.presentation.recommended")
+        _boolean(presentation["defaultSelected"], f"{context}.presentation.defaultSelected")
+        order = presentation["order"]
+        if not isinstance(order, int) or isinstance(order, bool) or order < 0:
+            raise CatalogError(f"{context}.presentation.order must be a non-negative integer")
+        raw_applications.append(application)
+        if installer and source in arch_sources and review["status"] == "reviewed" and architecture in architectures:
+            applications.append(Application(application_id, names, tuple(packages), tuple(architectures), network_required, order))
+    _unique_ids(raw_applications, "application")
+
     profiles: list[Profile] = []
     raw_profiles: list[dict[str, Any]] = []
     profile_fields = {
@@ -170,7 +235,7 @@ def load_catalog(path: str | Path, architecture: str) -> Catalog:
     }
     for index, item in enumerate(_array(root["profiles"], "catalog.profiles")):
         context = f"profile[{index}]"
-        profile = _object(item, context, profile_fields)
+        profile = _object(item, context, profile_fields, {"applications"})
         profile_id = _string(profile["id"], f"{context}.id", ID_RE)
         names = _localized(profile["name"], f"{context}.name")
         description = _localized(profile["description"], f"{context}.description")
@@ -184,6 +249,8 @@ def load_catalog(path: str | Path, architecture: str) -> Catalog:
         if source not in arch_sources:
             raise CatalogError(f"{context} source must be the pacman arch source")
         packages = _unique_strings(profile["packages"], f"{context}.packages", pattern=PACKAGE_RE)
+        if "applications" in profile:
+            _unique_strings(profile["applications"], f"{context}.applications", pattern=ID_RE)
         _boolean(profile["installer"], f"{context}.installer")
 
         availability = _object(profile["availability"], f"{context}.availability", {"architectures", "networkRequired"})
@@ -210,4 +277,4 @@ def load_catalog(path: str | Path, architecture: str) -> Catalog:
         raw_profiles.append(profile)
         profiles.append(Profile(profile_id, names, description, tuple(packages), tuple(architectures), network_required, order))
     _unique_ids(raw_profiles, "profile")
-    return Catalog(catalog_path, sha256_bytes(raw), release, architecture, tuple(profiles))
+    return Catalog(catalog_path, sha256_bytes(raw), release, architecture, tuple(profiles), tuple(applications))

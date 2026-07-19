@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "linxira-components"
-version = "0.1.0"
-description = "Safe Phase 1 planning core for Linxira OS component transactions"
+version = "0.2.0"
+description = "Catalog-bound Arch package transaction backend for Linxira OS"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}

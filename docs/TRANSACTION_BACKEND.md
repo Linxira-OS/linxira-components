@@ -2,25 +2,25 @@
 
 ## Status
 
-This is a Phase 1 design contract, not an enabled service. The repository does
-not install a D-Bus service file, systemd unit, Polkit rule, or privileged
-executable. `linxira-components apply` is intentionally unimplemented.
+Phase 1 provides a root-only CLI backend used through Package Center's explicit
+`pkexec` boundary. It revalidates confirmation fields, catalog bytes, profile
+and application IDs, and the expanded package target set before invoking
+pacman. The repository does not yet install a D-Bus service or systemd unit.
 
 ## Trust boundary
 
-The production backend will be a narrowly scoped root-owned **system D-Bus**
-service. An unprivileged client may submit only a schema-validated confirmation
-document. It may not submit package-manager arguments, repository definitions,
-filesystem paths, hooks, environment variables, or command strings.
+The current backend accepts only a schema-validated confirmation document. It
+does not accept package-manager arguments, repository definitions, filesystem
+paths, hooks, environment variables, removals, upgrades, or command strings.
+Package Center creates the plan and confirmation as the unprivileged user, then
+authorizes only `apply` through `pkexec`.
 
-Authorization will be checked for the calling D-Bus peer through Polkit at the
-moment an apply operation begins. Identity and authorization must not be passed
-as client-controlled fields. The service will serialize transactions and emit
-state changes tied to a receipt UUID.
+The later service hardening target remains a narrowly scoped root-owned system
+D-Bus service with peer authorization through Polkit and serialized operations.
 
 ## Frozen transaction inputs
 
-Planning in production will resolve package versions and signed package files
+Future frozen planning will resolve package versions and signed package files
 without touching the host package database. Resolution and preflight checks
 will use **pyalpm with a private DBPath**, private cache, and an explicit,
 distribution-owned mirror configuration. The resulting frozen plan will bind:
@@ -32,7 +32,10 @@ distribution-owned mirror configuration. The resulting frozen plan will bind:
 - dependency closure and declared conflict/removal set;
 - network and full-system-upgrade requirements.
 
-Only frozen, downloaded, cryptographically signed package files accepted by the
+The Phase 1 backend currently delegates dependency/version resolution and
+signature enforcement to the target system's pacman configuration. Only the
+catalog-expanded direct targets cross the privilege boundary. A later backend
+must ensure only frozen, downloaded, cryptographically signed package files accepted by the
 distribution keyring may cross into apply. The backend will not reinterpret
 profile IDs or resolve newer versions while applying.
 
@@ -46,10 +49,9 @@ architecture, conflicts, removals, or upgrade requirements. It must never
 silently re-plan, broaden targets, or ask the package manager to choose newer
 artifacts after confirmation.
 
-Host mutations will use libalpm through pyalpm, not shell commands. A system
-upgrade will require an explicit plan flag and authorization. Package scripts
-and hooks remain part of the Arch package trust boundary and must be surfaced
-in audit records.
+Phase 1 host mutations use pacman without a shell and reject system upgrades.
+Future D-Bus service mutations should use libalpm through pyalpm. Package
+scripts and hooks remain part of the Arch package trust boundary.
 
 ## Receipt lifecycle
 

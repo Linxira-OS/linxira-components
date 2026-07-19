@@ -34,3 +34,7 @@ class InvalidTransitionError(ValidationError):
 
 class NotImplementedTransactionError(ComponentsError):
     code = "NOT_IMPLEMENTED"
+
+
+class TransactionError(ComponentsError):
+    code = "TRANSACTION_FAILED"
