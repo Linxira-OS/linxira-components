@@ -35,6 +35,7 @@ from linxira_components.models import (  # noqa: E402
     Receipt,
     create_confirmation,
     create_request_plan,
+    validate_confirmation,
     validate_request_plan,
 )
 
@@ -243,6 +244,37 @@ class PlanTests(CatalogFixture):
         confirmation = create_confirmation(plan, catalog, clock=lambda: NOW)
         self.assertEqual(confirmation["applicationIds"], ["haruna"])
 
+    def test_application_only_confirmation_validates(self) -> None:
+        catalog = self.load()
+        plan = create_request_plan(
+            catalog,
+            [],
+            "x86_64",
+            application_ids=["haruna"],
+            clock=lambda: NOW,
+        )
+        confirmation = create_confirmation(plan, catalog, clock=lambda: NOW)
+
+        self.assertIs(validate_confirmation(confirmation), confirmation)
+
+    def test_confirmation_rejects_empty_selection(self) -> None:
+        catalog = self.load()
+        plan = create_request_plan(
+            catalog,
+            [],
+            "x86_64",
+            application_ids=["haruna"],
+            clock=lambda: NOW,
+        )
+        confirmation = create_confirmation(plan, catalog, clock=lambda: NOW)
+        confirmation["applicationIds"] = []
+        confirmation["digest"] = document_digest(confirmation)
+
+        with self.assertRaisesRegex(
+            ValidationError, "must select a profile or application"
+        ):
+            validate_confirmation(confirmation)
+
     def test_digest_tamper_is_rejected(self) -> None:
         catalog, plan = self.create_plan()
         plan["directPackageTargets"].append("tampered")  # type: ignore[union-attr]
@@ -368,6 +400,38 @@ class SafetyTests(CatalogFixture):
         persisted = list((self.directory / "receipts").glob("*.json"))
         self.assertEqual(len(persisted), 1)
         self.assertEqual(json.loads(persisted[0].read_text(encoding="utf-8"))["status"], "succeeded")
+
+    def test_apply_application_only_transaction_and_persists_receipt(self) -> None:
+        catalog = self.load()
+        plan = create_request_plan(
+            catalog,
+            [],
+            "x86_64",
+            application_ids=["haruna"],
+            clock=lambda: NOW,
+        )
+        confirmation = create_confirmation(plan, catalog, clock=lambda: NOW)
+        runner = mock.Mock(
+            return_value=subprocess.CompletedProcess([], 0, "installed", "")
+        )
+
+        receipt = apply_transaction(
+            confirmation,
+            receipt_dir=self.directory / "receipts",
+            catalog_path=self.catalog_path,
+            effective_uid=0,
+            runner=runner,
+        )
+
+        self.assertEqual(
+            runner.call_args.args[0],
+            ["pacman", "--sync", "--needed", "--noconfirm", "--", "haruna"],
+        )
+        self.assertEqual(receipt["status"], "succeeded")
+        self.assertEqual(receipt["requestPlanId"], plan["id"])
+        self.assertEqual(receipt["planDigest"], plan["digest"])
+        persisted = list((self.directory / "receipts").glob("*.json"))
+        self.assertEqual(len(persisted), 1)
 
     def test_apply_records_failed_receipt_when_pacman_fails(self) -> None:
         _, confirmation = self.confirmed()

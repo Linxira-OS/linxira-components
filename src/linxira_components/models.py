@@ -207,8 +207,8 @@ def validate_confirmation(document: Any, *, catalog_sha256: str | None = None) -
     if not isinstance(confirmation["architecture"], str) or not confirmation["architecture"]:
         raise ValidationError("confirmation architecture must be a non-empty string")
     profile_ids = confirmation["profileIds"]
-    if not isinstance(profile_ids, list) or not profile_ids or profile_ids != sorted(set(profile_ids)):
-        raise ValidationError("confirmation profileIds must be sorted and non-empty")
+    if not isinstance(profile_ids, list) or profile_ids != sorted(set(profile_ids)):
+        raise ValidationError("confirmation profileIds must be sorted")
     if not all(isinstance(value, str) and ID_RE.fullmatch(value) for value in profile_ids):
         raise ValidationError("confirmation contains an invalid profile ID")
     application_ids = confirmation["applicationIds"]
