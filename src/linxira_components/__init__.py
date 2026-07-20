@@ -14,4 +14,4 @@ __all__ = [
     "validate_request_plan",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

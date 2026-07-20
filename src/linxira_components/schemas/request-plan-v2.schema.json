@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://linxira.org/schemas/components/request-plan-v2.schema.json",
+  "title": "Linxira Catalog v3 request plan v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "createdAt", "catalogSha256", "catalogRelease", "architecture", "selection", "finalLeafIds", "selectedBundleIds", "leafRequirements", "providerRequirements", "sourceRequirements", "pendingItems", "unsupportedItems", "directPackageTargets", "networkRequired", "systemUpgradeRequired", "digest"],
+  "properties": {
+    "schemaVersion": {"const": "org.linxira.components.request-plan.v2"},
+    "id": {"type": "string", "format": "uuid"},
+    "createdAt": {"type": "string"},
+    "catalogSha256": {"$ref": "#/$defs/sha256"},
+    "catalogRelease": {"type": "string", "minLength": 1},
+    "architecture": {"type": "string", "minLength": 1},
+    "selection": {"type": "object"},
+    "finalLeafIds": {"$ref": "#/$defs/ids"},
+    "selectedBundleIds": {"$ref": "#/$defs/ids"},
+    "leafRequirements": {"type": "array", "items": {"$ref": "#/$defs/leafRequirement"}},
+    "providerRequirements": {"$ref": "#/$defs/ids"},
+    "sourceRequirements": {"$ref": "#/$defs/ids"},
+    "pendingItems": {"$ref": "#/$defs/ids"},
+    "unsupportedItems": {"$ref": "#/$defs/ids"},
+    "directPackageTargets": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9@._+-]+$"}},
+    "networkRequired": {"type": "boolean"},
+    "systemUpgradeRequired": {"const": false},
+    "digest": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+    "ids": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "leafRequirement": {"type": "object", "additionalProperties": false, "required": ["id", "kind", "requestedBy", "provenance", "provider", "source", "packageTargets", "status", "reason"], "properties": {"id": {"$ref": "#/$defs/id"}, "kind": {"enum": ["application", "component", "operation"]}, "requestedBy": {"type": "array", "items": {"type": "string"}}, "provenance": {"type": "array", "items": {"type": "string"}}, "provider": {"$ref": "#/$defs/id"}, "source": {"$ref": "#/$defs/id"}, "packageTargets": {"type": "array", "items": {"type": "string"}}, "status": {"enum": ["ready", "pending", "unsupported"]}, "reason": {"type": ["string", "null"]}}}
+  }
+}

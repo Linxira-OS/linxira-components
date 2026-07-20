@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://linxira.org/schemas/components/selection-v1.schema.json",
+  "title": "Linxira Catalog v3 component selection v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "catalogSha256", "catalogRelease", "selectedLeafIds", "selectedBundleIds", "leaves", "userOverrides", "constraintResults", "providerRequirements", "sourceRequirements"],
+  "properties": {
+    "schemaVersion": {"const": "org.linxira.component-selection.v1"},
+    "catalogSha256": {"$ref": "#/$defs/sha256"},
+    "catalogRelease": {"type": "string", "minLength": 1},
+    "selectedLeafIds": {"$ref": "#/$defs/ids"},
+    "selectedBundleIds": {"$ref": "#/$defs/ids"},
+    "leaves": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "requestedBy", "provenance"],
+        "properties": {
+          "id": {"$ref": "#/$defs/id"},
+          "requestedBy": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+          "provenance": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["required", "recommended", "optional", "user"]}}
+        }
+      }
+    },
+    "userOverrides": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "selected"],
+        "properties": {"id": {"$ref": "#/$defs/id"}, "selected": {"type": "boolean"}}
+      }
+    },
+    "constraintResults": {"type": "array", "items": {"type": "object"}},
+    "providerRequirements": {"$ref": "#/$defs/ids"},
+    "sourceRequirements": {"$ref": "#/$defs/ids"}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+    "ids": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

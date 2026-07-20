@@ -3,9 +3,10 @@
 ## Status
 
 Phase 1 provides a root-only CLI backend used through Package Center's explicit
-`pkexec` boundary. It revalidates confirmation fields, catalog bytes, profile
-and application IDs, and the expanded package target set before invoking
-pacman. The repository does not yet install a D-Bus service or systemd unit.
+`pkexec` boundary. It revalidates confirmation fields, catalog bytes, Catalog v2
+profile/application IDs or a Catalog v3 selection graph, and the expanded
+package target set before invoking pacman. The repository does not yet install
+a D-Bus service or systemd unit.
 
 ## Trust boundary
 
@@ -38,6 +39,30 @@ catalog-expanded direct targets cross the privilege boundary. A later backend
 must ensure only frozen, downloaded, cryptographically signed package files accepted by the
 distribution keyring may cross into apply. The backend will not reinterpret
 profile IDs or resolve newer versions while applying.
+
+## Catalog v3 selection boundary
+
+`plan --selection FILE` accepts only the resolved selection document produced
+from the same catalog bytes. Planning independently validates stable
+application/component/bundle IDs, every nested `requestedBy` edge, exact
+required/recommended/optional/user provenance, effective nested bundles, user
+overrides, selection constraints, and provider/source requirement summaries.
+
+Only available leaves with `provider: pacman` and `source: arch` become package
+targets. Package targets come only from the catalog leaf's `package`,
+`packages`, or `artifact` field; the current draft v3 catalog compatibility
+rule uses the stable leaf ID when a pacman leaf omits all three. Selection input
+cannot supply package names. AUR and Conda leaves, operation leaves, and
+unavailable leaves are recorded as `pending`; other providers and non-Arch
+pacman sources are `unsupported`. Neither class is converted into an argv or
+arbitrary command. A pending-only confirmation writes a receipt without
+starting a process.
+
+Catalog v3 request plans, confirmations, and receipts record final leaf IDs,
+selected bundle IDs, each leaf's requested paths and provenance,
+provider/source requirements, exact ready package targets, and all pending or
+unsupported items. Confirmation and apply independently re-expand the embedded
+selection and require every recorded field to match.
 
 ## Drift rejection
 

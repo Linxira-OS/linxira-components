@@ -134,7 +134,7 @@ def _unique_ids(items: list[dict[str, Any]], context: str) -> None:
         raise CatalogError(f"duplicate {context} ID")
 
 
-def load_catalog(path: str | Path, architecture: str) -> Catalog:
+def _load_catalog_v2(path: str | Path, architecture: str) -> Catalog:
     catalog_path = Path(path)
     try:
         raw = catalog_path.read_bytes()
@@ -278,3 +278,19 @@ def load_catalog(path: str | Path, architecture: str) -> Catalog:
         profiles.append(Profile(profile_id, names, description, tuple(packages), tuple(architectures), network_required, order))
     _unique_ids(raw_profiles, "profile")
     return Catalog(catalog_path, sha256_bytes(raw), release, architecture, tuple(profiles), tuple(applications))
+
+
+def load_catalog(path: str | Path, architecture: str) -> Catalog | Any:
+    catalog_path = Path(path)
+    try:
+        raw = catalog_path.read_bytes()
+        document = loads_strict(raw, source=str(catalog_path))
+    except OSError as exc:
+        raise CatalogError(f"cannot read catalog {catalog_path}: {exc}") from exc
+    except ValidationError as exc:
+        raise CatalogError(str(exc)) from exc
+    if isinstance(document, dict) and document.get("catalogVersion") == 3:
+        from .catalog_v3 import load_catalog_v3
+
+        return load_catalog_v3(catalog_path, architecture)
+    return _load_catalog_v2(catalog_path, architecture)

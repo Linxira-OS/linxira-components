@@ -396,6 +396,7 @@ class SafetyTests(CatalogFixture):
         command = runner.call_args.args[0]
         self.assertEqual(command[:5], ["pacman", "--sync", "--needed", "--noconfirm", "--"])
         self.assertEqual(command[5:], ["git", "python", "python-numpy", "shared-tool"])
+        self.assertFalse(runner.call_args.kwargs["shell"])
         self.assertEqual(runner.call_args.kwargs["env"], {"PATH": "/usr/bin:/usr/sbin", "LC_ALL": "C"})
         persisted = list((self.directory / "receipts").glob("*.json"))
         self.assertEqual(len(persisted), 1)

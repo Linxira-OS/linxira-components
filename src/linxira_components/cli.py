@@ -28,6 +28,7 @@ def _parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--arch", default="x86_64")
     plan_parser.add_argument("--profile", action="append", default=[], dest="profiles")
     plan_parser.add_argument("--application", action="append", default=[], dest="applications")
+    plan_parser.add_argument("--selection", "--selection-document", type=Path)
     plan_parser.add_argument("--output-dir", type=Path, required=True)
     plan_parser.add_argument("--output", default="request-plan.json")
 
@@ -40,6 +41,7 @@ def _parser() -> argparse.ArgumentParser:
 
     apply_parser = subcommands.add_parser("apply", help="apply a confirmed Arch transaction as root")
     apply_parser.add_argument("--confirmation", type=Path, required=True)
+    apply_parser.add_argument("--catalog", type=Path, default=None)
     apply_parser.add_argument("--receipt-dir", type=Path, default=None)
     return parser
 
@@ -77,6 +79,7 @@ def _run(args: argparse.Namespace) -> int:
             args.profiles,
             args.arch,
             application_ids=args.applications,
+            selection=load_strict(args.selection) if args.selection is not None else None,
         )
         path = atomic_write_json(args.output_dir, args.output, plan)
         _print_json({"path": str(path), "digest": plan["digest"]})
@@ -94,6 +97,7 @@ def _run(args: argparse.Namespace) -> int:
         confirmation = load_strict(args.confirmation)
         receipt = apply_transaction(
             confirmation,
+            **({"catalog_path": args.catalog} if args.catalog is not None else {}),
             **({"receipt_dir": args.receipt_dir} if args.receipt_dir is not None else {}),
         )
         _print_json(receipt)

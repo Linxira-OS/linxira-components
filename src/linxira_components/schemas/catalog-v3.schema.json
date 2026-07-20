@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://linxira.org/schemas/components/catalog-v3.schema.json",
+  "title": "Linxira component catalog v3 backend input",
+  "type": "object",
+  "required": ["catalogVersion", "bundles"],
+  "anyOf": [{"required": ["components"]}, {"required": ["applications"]}],
+  "properties": {
+    "catalogVersion": {"const": 3},
+    "release": {"type": "string", "minLength": 1},
+    "components": {"type": "array", "items": {"$ref": "#/$defs/leaf"}},
+    "applications": {"type": "array", "items": {"$ref": "#/$defs/leaf"}},
+    "bundles": {"type": "array", "items": {"$ref": "#/$defs/bundle"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+    "leaf": {
+      "type": "object",
+      "required": ["id", "provider", "source"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "kind": {"enum": ["application", "component", "operation"]},
+        "provider": {"$ref": "#/$defs/id"},
+        "source": {"$ref": "#/$defs/id"},
+        "package": {"type": "string", "pattern": "^[a-z0-9@._+-]+$"},
+        "packages": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9@._+-]+$"}},
+        "artifact": {"type": "string", "pattern": "^[a-z0-9@._+-]+$"},
+        "availability": {"oneOf": [{"type": "boolean"}, {"type": "object"}]}
+      }
+    },
+    "bundle": {
+      "type": "object",
+      "required": ["id", "children"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "selection": {"oneOf": [{"enum": ["multi", "exclusive", "bounded", "preset"]}, {"type": "object"}]},
+        "maxSelected": {"type": "integer", "minimum": 1},
+        "children": {"oneOf": [{"type": "object"}, {"type": "array"}]}
+      }
+    }
+  }
+}

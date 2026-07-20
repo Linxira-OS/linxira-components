@@ -7,13 +7,18 @@ from typing import Any, Callable
 from uuid import UUID, uuid4
 
 from .catalog import Catalog, ID_RE, PACKAGE_RE
+from .catalog_v3 import CatalogV3, STABLE_ID_RE
 from .errors import CatalogDriftError, DigestError, InvalidTransitionError, ValidationError
 from .jsonio import document_digest
+from .selection import expand_selection
 
 
 PLAN_SCHEMA = "org.linxira.components.request-plan.v1"
+PLAN_V2_SCHEMA = "org.linxira.components.request-plan.v2"
 CONFIRMATION_SCHEMA = "org.linxira.components.confirmation.v1"
+CONFIRMATION_V2_SCHEMA = "org.linxira.components.confirmation.v2"
 RECEIPT_SCHEMA = "org.linxira.components.receipt.v1"
+RECEIPT_V2_SCHEMA = "org.linxira.components.receipt.v2"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 UTC_TIMESTAMP_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 Clock = Callable[[], datetime]
@@ -67,16 +72,38 @@ def _exact_fields(document: Any, expected: set[str], context: str) -> dict[str, 
 
 
 def create_request_plan(
-    catalog: Catalog,
+    catalog: Catalog | CatalogV3,
     profile_ids: list[str] | tuple[str, ...],
     architecture: str,
     *,
     application_ids: list[str] | tuple[str, ...] = (),
+    selection: Any | None = None,
     clock: Clock = utc_now,
     id_factory: Callable[[], Any] = uuid4,
 ) -> dict[str, Any]:
     if architecture != catalog.architecture:
         raise ValidationError("plan architecture differs from the validated catalog architecture")
+    if isinstance(catalog, CatalogV3):
+        if profile_ids or application_ids:
+            raise ValidationError("Catalog v3 planning accepts only a selection document")
+        if selection is None:
+            raise ValidationError("Catalog v3 planning requires a selection document")
+        expanded = expand_selection(selection, catalog)
+        document = {
+            "schemaVersion": PLAN_V2_SCHEMA,
+            "id": str(id_factory()),
+            "createdAt": format_utc(clock()),
+            "catalogSha256": catalog.sha256,
+            "catalogRelease": catalog.release,
+            "architecture": architecture,
+            "selection": selection,
+            **expanded,
+            "systemUpgradeRequired": False,
+        }
+        document["digest"] = document_digest(document)
+        return document
+    if selection is not None:
+        raise ValidationError("--selection requires a Catalog v3 input")
     if not profile_ids and not application_ids:
         raise ValidationError("at least one profile or application ID is required")
     selected = catalog.select(profile_ids)
@@ -102,6 +129,8 @@ def create_request_plan(
 
 
 def validate_request_plan(document: Any, *, catalog_sha256: str | None = None) -> dict[str, Any]:
+    if isinstance(document, dict) and document.get("schemaVersion") == PLAN_V2_SCHEMA:
+        return _validate_request_plan_v2(document, catalog_sha256=catalog_sha256)
     expected = {
         "schemaVersion", "id", "createdAt", "catalogSha256", "architecture",
         "profileIds", "applicationIds", "directPackageTargets", "networkRequired",
@@ -144,9 +173,96 @@ def validate_request_plan(document: Any, *, catalog_sha256: str | None = None) -
     return plan
 
 
+V3_MATERIAL_FIELDS = {
+    "selection", "finalLeafIds", "selectedBundleIds", "leafRequirements",
+    "providerRequirements", "sourceRequirements", "pendingItems", "unsupportedItems",
+    "directPackageTargets", "networkRequired", "systemUpgradeRequired",
+}
+
+
+def _validate_v3_material(document: dict[str, Any], *, context: str) -> None:
+    for field_name in (
+        "finalLeafIds", "selectedBundleIds", "providerRequirements", "sourceRequirements",
+        "pendingItems", "unsupportedItems", "directPackageTargets",
+    ):
+        values = document[field_name]
+        if not isinstance(values, list) or not all(isinstance(item, str) and item for item in values):
+            raise ValidationError(f"{context} {field_name} must be a string array")
+        if values != sorted(set(values)):
+            raise ValidationError(f"{context} {field_name} must be de-duplicated and stably sorted")
+    if not document["finalLeafIds"]:
+        raise ValidationError(f"{context} finalLeafIds must be non-empty")
+    if not all(STABLE_ID_RE.fullmatch(value) for value in document["finalLeafIds"] + document["selectedBundleIds"]):
+        raise ValidationError(f"{context} contains an invalid stable ID")
+    if not all(PACKAGE_RE.fullmatch(value) for value in document["directPackageTargets"]):
+        raise ValidationError(f"{context} contains an invalid package target")
+    if not isinstance(document["selection"], dict):
+        raise ValidationError(f"{context} selection must be an object")
+    requirements = document["leafRequirements"]
+    if not isinstance(requirements, list) or len(requirements) != len(document["finalLeafIds"]):
+        raise ValidationError(f"{context} leafRequirements must cover every final leaf")
+    requirement_ids: list[str] = []
+    for index, item in enumerate(requirements):
+        expected = {"id", "kind", "requestedBy", "provenance", "provider", "source", "packageTargets", "status", "reason"}
+        if not isinstance(item, dict) or set(item) != expected:
+            raise ValidationError(f"{context} leafRequirements[{index}] has invalid fields")
+        if item["status"] not in {"ready", "pending", "unsupported"}:
+            raise ValidationError(f"{context} leafRequirements[{index}] has invalid status")
+        if item["kind"] not in {"application", "component", "operation"}:
+            raise ValidationError(f"{context} leafRequirements[{index}] has invalid kind")
+        for field_name in ("requestedBy", "provenance", "packageTargets"):
+            values = item[field_name]
+            if not isinstance(values, list) or values != sorted(set(values)) or not all(isinstance(value, str) and value for value in values):
+                raise ValidationError(f"{context} leafRequirements[{index}].{field_name} must be sorted strings")
+        if not all(PACKAGE_RE.fullmatch(value) for value in item["packageTargets"]):
+            raise ValidationError(f"{context} leafRequirements[{index}] contains an invalid package target")
+        if item["status"] != "ready" and item["packageTargets"]:
+            raise ValidationError(f"{context} non-ready leaves cannot contain package targets")
+        if not isinstance(item["provider"], str) or not isinstance(item["source"], str):
+            raise ValidationError(f"{context} leafRequirements[{index}] has invalid provider/source")
+        if item["reason"] is not None and not isinstance(item["reason"], str):
+            raise ValidationError(f"{context} leafRequirements[{index}].reason must be string or null")
+        requirement_ids.append(item["id"])
+    if requirement_ids != document["finalLeafIds"]:
+        raise ValidationError(f"{context} leafRequirements are not in final leaf order")
+    statuses = {item["id"]: item["status"] for item in requirements}
+    if document["pendingItems"] != sorted(key for key, value in statuses.items() if value == "pending"):
+        raise ValidationError(f"{context} pendingItems do not match leaf statuses")
+    if document["unsupportedItems"] != sorted(key for key, value in statuses.items() if value == "unsupported"):
+        raise ValidationError(f"{context} unsupportedItems do not match leaf statuses")
+    ready_targets = sorted({target for item in requirements if item["status"] == "ready" for target in item["packageTargets"]})
+    if document["directPackageTargets"] != ready_targets:
+        raise ValidationError(f"{context} package targets do not match ready leaves")
+    if not isinstance(document["networkRequired"], bool) or document["systemUpgradeRequired"] is not False:
+        raise ValidationError(f"{context} has invalid transaction flags")
+
+
+def _validate_request_plan_v2(document: Any, *, catalog_sha256: str | None = None) -> dict[str, Any]:
+    expected = {
+        "schemaVersion", "id", "createdAt", "catalogSha256", "catalogRelease", "architecture",
+        *V3_MATERIAL_FIELDS, "digest",
+    }
+    plan = _exact_fields(document, expected, "Catalog v3 request plan")
+    _validate_uuid(plan["id"], "request plan id")
+    _validate_timestamp(plan["createdAt"], "createdAt")
+    for field_name in ("catalogSha256", "digest"):
+        if not isinstance(plan[field_name], str) or not SHA256_RE.fullmatch(plan[field_name]):
+            raise ValidationError(f"{field_name} must be a lowercase SHA-256 digest")
+    if catalog_sha256 is not None and plan["catalogSha256"] != catalog_sha256:
+        raise CatalogDriftError("catalog changed after the request plan was created")
+    if not isinstance(plan["catalogRelease"], str) or not plan["catalogRelease"]:
+        raise ValidationError("catalogRelease must be a non-empty string")
+    if not isinstance(plan["architecture"], str) or not plan["architecture"]:
+        raise ValidationError("architecture must be a non-empty string")
+    _validate_v3_material(plan, context="Catalog v3 request plan")
+    if plan["digest"] != document_digest(plan):
+        raise DigestError("request plan digest does not match its canonical content")
+    return plan
+
+
 def create_confirmation(
     plan: dict[str, Any],
-    catalog: Catalog,
+    catalog: Catalog | CatalogV3,
     *,
     clock: Clock = utc_now,
     id_factory: Callable[[], Any] = uuid4,
@@ -154,6 +270,28 @@ def create_confirmation(
     validated = validate_request_plan(plan, catalog_sha256=catalog.sha256)
     if validated["architecture"] != catalog.architecture:
         raise ValidationError("request plan architecture differs from the validated catalog architecture")
+    if isinstance(catalog, CatalogV3):
+        if validated["schemaVersion"] != PLAN_V2_SCHEMA:
+            raise ValidationError("Catalog v3 requires a v2 request plan")
+        expanded = expand_selection(validated["selection"], catalog)
+        for field_name, expected_value in expanded.items():
+            if validated[field_name] != expected_value:
+                raise ValidationError(f"request plan {field_name} does not match Catalog v3 selection expansion")
+        document = {
+            "schemaVersion": CONFIRMATION_V2_SCHEMA,
+            "id": str(id_factory()),
+            "confirmedAt": format_utc(clock()),
+            "requestPlanId": validated["id"],
+            "planDigest": validated["digest"],
+            "catalogSha256": catalog.sha256,
+            "catalogRelease": catalog.release,
+            "architecture": validated["architecture"],
+            **{field_name: validated[field_name] for field_name in V3_MATERIAL_FIELDS},
+        }
+        document["digest"] = document_digest(document)
+        return document
+    if validated["schemaVersion"] != PLAN_SCHEMA:
+        raise ValidationError("Catalog v2 requires a v1 request plan")
     selected = catalog.select(validated["profileIds"])
     selected_applications = catalog.select_applications(validated["applicationIds"])
     expected_packages = sorted(
@@ -188,6 +326,8 @@ def create_confirmation(
 
 
 def validate_confirmation(document: Any, *, catalog_sha256: str | None = None) -> dict[str, Any]:
+    if isinstance(document, dict) and document.get("schemaVersion") == CONFIRMATION_V2_SCHEMA:
+        return _validate_confirmation_v2(document, catalog_sha256=catalog_sha256)
     expected = {
         "schemaVersion", "id", "confirmedAt", "requestPlanId", "planDigest",
         "catalogSha256", "architecture", "profileIds", "applicationIds", "directPackageTargets", "networkRequired",
@@ -233,6 +373,30 @@ def validate_confirmation(document: Any, *, catalog_sha256: str | None = None) -
     return confirmation
 
 
+def _validate_confirmation_v2(document: Any, *, catalog_sha256: str | None = None) -> dict[str, Any]:
+    expected = {
+        "schemaVersion", "id", "confirmedAt", "requestPlanId", "planDigest", "catalogSha256",
+        "catalogRelease", "architecture", *V3_MATERIAL_FIELDS, "digest",
+    }
+    confirmation = _exact_fields(document, expected, "Catalog v3 confirmation")
+    _validate_uuid(confirmation["id"], "confirmation id")
+    _validate_timestamp(confirmation["confirmedAt"], "confirmedAt")
+    _validate_uuid(confirmation["requestPlanId"], "requestPlanId")
+    for field_name in ("planDigest", "catalogSha256", "digest"):
+        if not isinstance(confirmation[field_name], str) or not SHA256_RE.fullmatch(confirmation[field_name]):
+            raise ValidationError(f"{field_name} must be a lowercase SHA-256 digest")
+    if catalog_sha256 is not None and confirmation["catalogSha256"] != catalog_sha256:
+        raise CatalogDriftError("catalog changed after confirmation")
+    if not isinstance(confirmation["catalogRelease"], str) or not confirmation["catalogRelease"]:
+        raise ValidationError("catalogRelease must be a non-empty string")
+    if not isinstance(confirmation["architecture"], str) or not confirmation["architecture"]:
+        raise ValidationError("confirmation architecture must be a non-empty string")
+    _validate_v3_material(confirmation, context="Catalog v3 confirmation")
+    if confirmation["digest"] != document_digest(confirmation):
+        raise DigestError("confirmation digest does not match its canonical content")
+    return confirmation
+
+
 ALLOWED_TRANSITIONS = {
     "planned": frozenset({"confirmed", "stale"}),
     "confirmed": frozenset({"applying", "stale", "interrupted"}),
@@ -253,6 +417,7 @@ class Receipt:
     created_at: str = field(default_factory=lambda: format_utc(utc_now()))
     updated_at: str | None = None
     message: str | None = None
+    transaction_details: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         _validate_uuid(self.id, "receipt id")
@@ -274,7 +439,7 @@ class Receipt:
 
     def to_document(self) -> dict[str, Any]:
         document: dict[str, Any] = {
-            "schemaVersion": RECEIPT_SCHEMA,
+            "schemaVersion": RECEIPT_V2_SCHEMA if self.transaction_details is not None else RECEIPT_SCHEMA,
             "id": self.id,
             "requestPlanId": self.request_plan_id,
             "planDigest": self.plan_digest,
@@ -283,5 +448,7 @@ class Receipt:
             "updatedAt": self.updated_at,
             "message": self.message,
         }
+        if self.transaction_details is not None:
+            document.update(self.transaction_details)
         document["digest"] = document_digest(document)
         return document

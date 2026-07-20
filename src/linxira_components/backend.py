@@ -7,13 +7,15 @@ import subprocess
 from typing import Any
 
 from .catalog import load_catalog
+from .catalog_v3 import CatalogV3
 from .errors import TransactionError, ValidationError
 from .jsonio import atomic_write_json
 from .models import Receipt, validate_confirmation
+from .selection import expand_selection
 
 
 DEFAULT_RECEIPT_DIR = Path("/var/lib/linxira/components/receipts")
-DEFAULT_CATALOG_PATH = Path("/usr/share/linxira/catalog/catalog-v2.json")
+DEFAULT_CATALOG_PATH = Path("/usr/share/linxira/catalog/catalog-v3.json")
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
@@ -54,14 +56,38 @@ def apply_transaction(
     validated = validate_confirmation(confirmation)
     catalog = load_catalog(catalog_path, validated["architecture"])
     validate_confirmation(validated, catalog_sha256=catalog.sha256)
-    profiles = catalog.select(validated["profileIds"])
-    applications = catalog.select_applications(validated["applicationIds"])
-    expected_targets = sorted(
-        {package for profile in profiles for package in profile.packages}
-        | {package for application in applications for package in application.packages}
-    )
-    if validated["directPackageTargets"] != expected_targets:
-        raise ValidationError("confirmation package targets do not match the current catalog profiles")
+    receipt_details: dict[str, Any] | None = None
+    if isinstance(catalog, CatalogV3):
+        if validated["schemaVersion"] != "org.linxira.components.confirmation.v2":
+            raise ValidationError("Catalog v3 requires a v2 confirmation")
+        expanded = expand_selection(validated["selection"], catalog)
+        for field_name, expected_value in expanded.items():
+            if validated[field_name] != expected_value:
+                raise ValidationError(f"confirmation {field_name} does not match Catalog v3 selection expansion")
+        receipt_details = {
+            "catalogSha256": validated["catalogSha256"],
+            "catalogRelease": validated["catalogRelease"],
+            "architecture": validated["architecture"],
+            "finalLeafIds": validated["finalLeafIds"],
+            "selectedBundleIds": validated["selectedBundleIds"],
+            "leafRequirements": validated["leafRequirements"],
+            "providerRequirements": validated["providerRequirements"],
+            "sourceRequirements": validated["sourceRequirements"],
+            "pendingItems": validated["pendingItems"],
+            "unsupportedItems": validated["unsupportedItems"],
+            "directPackageTargets": validated["directPackageTargets"],
+        }
+    else:
+        if validated["schemaVersion"] != "org.linxira.components.confirmation.v1":
+            raise ValidationError("Catalog v2 requires a v1 confirmation")
+        profiles = catalog.select(validated["profileIds"])
+        applications = catalog.select_applications(validated["applicationIds"])
+        expected_targets = sorted(
+            {package for profile in profiles for package in profile.packages}
+            | {package for application in applications for package in application.packages}
+        )
+        if validated["directPackageTargets"] != expected_targets:
+            raise ValidationError("confirmation package targets do not match the current catalog profiles")
     uid = _effective_uid() if effective_uid is None else effective_uid
     if uid != 0:
         raise ValidationError("the transaction backend must run as root")
@@ -71,6 +97,7 @@ def apply_transaction(
     receipt = Receipt(
         request_plan_id=validated["requestPlanId"],
         plan_digest=validated["planDigest"],
+        transaction_details=receipt_details,
     )
     receipt_dir_path = Path(receipt_dir)
     _persist(receipt, receipt_dir_path)
@@ -78,6 +105,11 @@ def apply_transaction(
     _persist(receipt, receipt_dir_path)
     receipt.transition("applying", message="Applying confirmed Arch package targets")
     _persist(receipt, receipt_dir_path)
+
+    if not validated["directPackageTargets"]:
+        receipt.transition("succeeded", message="No executable Arch package leaves; pending and unsupported items were not run")
+        _persist(receipt, receipt_dir_path)
+        return receipt.to_document()
 
     command: Sequence[str] = (
         pacman,
@@ -93,6 +125,7 @@ def apply_transaction(
             check=False,
             capture_output=True,
             text=True,
+            shell=False,
             env={"PATH": "/usr/bin:/usr/sbin", "LC_ALL": "C"},
         )
     except OSError as exc:
