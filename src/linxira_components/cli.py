@@ -41,8 +41,6 @@ def _parser() -> argparse.ArgumentParser:
 
     apply_parser = subcommands.add_parser("apply", help="apply a confirmed Arch transaction as root")
     apply_parser.add_argument("--confirmation", type=Path, required=True)
-    apply_parser.add_argument("--catalog", type=Path, default=None)
-    apply_parser.add_argument("--receipt-dir", type=Path, default=None)
     return parser
 
 
@@ -95,11 +93,7 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.command == "apply":
         confirmation = load_strict(args.confirmation)
-        receipt = apply_transaction(
-            confirmation,
-            **({"catalog_path": args.catalog} if args.catalog is not None else {}),
-            **({"receipt_dir": args.receipt_dir} if args.receipt_dir is not None else {}),
-        )
+        receipt = apply_transaction(confirmation)
         _print_json(receipt)
         return 0
     raise AssertionError("unreachable command")

@@ -126,6 +126,12 @@ class CatalogFixture(unittest.TestCase):
 
 
 class CatalogTests(CatalogFixture):
+    def test_privileged_apply_rejects_caller_paths(self) -> None:
+        for option in ("--catalog", "--receipt-dir"):
+            with self.subTest(option=option), redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    main(["apply", "--confirmation", "confirmation.json", option, "caller-path"])
+
     def test_loads_valid_catalog_and_lists_profiles(self) -> None:
         catalog = self.load()
         self.assertEqual([profile.id for profile in catalog.profiles], ["developer", "science"])
