@@ -243,7 +243,7 @@ class SystemTransactionTests(unittest.TestCase):
         if not detector.is_file() or not os.access(detector, os.X_OK):
             self.skipTest("installed Linxira hardware detector is unavailable")
         with tempfile.TemporaryDirectory() as directory:
-            store = SystemTransactionStore(Path(directory), Path("/"))
+            store = SystemTransactionStore(Path(directory), self.root)
             plan = store.create_plan(HARDWARE_OPERATION, "{}", 1000)
             receipt = store.confirm_and_apply(plan["id"], plan["digest"], 1000)
         self.assertEqual(receipt["status"], "succeeded")
