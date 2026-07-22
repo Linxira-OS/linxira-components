@@ -20,7 +20,7 @@ from linxira_components.catalog import load_catalog  # noqa: E402
 from linxira_components.cli import main  # noqa: E402
 from linxira_components.errors import CatalogDriftError, CatalogError, ValidationError  # noqa: E402
 from linxira_components.models import create_confirmation, create_request_plan  # noqa: E402
-from linxira_components.selection import expand_selection  # noqa: E402
+from linxira_components.selection import create_bundle_selection, expand_selection  # noqa: E402
 
 
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
@@ -159,6 +159,70 @@ class V3Fixture(unittest.TestCase):
         self.write_catalog(document)
         with self.assertRaisesRegex(CatalogError, r"invalid components\[0\]\.kind"):
             load_catalog(self.catalog_path, "x86_64")
+
+    def test_creates_catalog_bound_selection_for_fixed_bundle(self) -> None:
+        document = catalog_document()
+        document["bundles"].append({
+            "id": "gaming-setup",
+            "selection": "preset",
+            "children": {
+                "required": ["python-runtime"],
+                "recommended": ["haruna"],
+                "optional": ["aur-tool"],
+            },
+        })
+        self.write_catalog(document)
+        catalog = load_catalog(self.catalog_path, "x86_64")
+        selection = create_bundle_selection(catalog, "gaming-setup")
+
+        self.assertEqual(selection["selectedLeafIds"], ["haruna", "python-runtime"])
+        self.assertEqual(selection["selectedBundleIds"], ["gaming-setup"])
+        self.assertEqual(selection["providerRequirements"], ["pacman"])
+        self.assertNotIn("aur-tool", selection["selectedLeafIds"])
+
+    def test_cli_plans_fixed_bundle_without_caller_package_ids(self) -> None:
+        document = catalog_document()
+        document["bundles"].append({
+            "id": "gaming-setup",
+            "selection": "preset",
+            "children": {
+                "required": ["python-runtime"],
+                "recommended": [],
+                "optional": [],
+            },
+        })
+        self.write_catalog(document)
+        output = self.directory / "bundle-plan"
+        output.mkdir()
+        self.assertEqual(main([
+            "plan", "--catalog", str(self.catalog_path), "--bundle", "gaming-setup",
+            "--output-dir", str(output),
+        ]), 0)
+        plan = json.loads((output / "request-plan.json").read_text(encoding="utf-8"))
+        self.assertEqual(plan["directPackageTargets"], ["python"])
+
+    def test_license_acceptance_is_required_and_bound_into_plan(self) -> None:
+        document = catalog_document()
+        document["applications"][0]["license"] = {
+            "spdx": "LicenseRef-Test",
+            "requiresAcceptance": True,
+        }
+        document["bundles"].append({
+            "id": "licensed-setup",
+            "selection": "preset",
+            "children": {"required": ["haruna"], "recommended": [], "optional": []},
+        })
+        self.write_catalog(document)
+        catalog = load_catalog(self.catalog_path, "x86_64")
+        selection = create_bundle_selection(catalog, "licensed-setup")
+        with self.assertRaisesRegex(ValidationError, "acceptedLicenseIds"):
+            create_request_plan(catalog, [], "x86_64", selection=selection)
+        plan = create_request_plan(
+            catalog, [], "x86_64", selection=selection, license_acceptances=["haruna"]
+        )
+        self.assertEqual(plan["acceptedLicenseIds"], ["haruna"])
+        confirmation = create_confirmation(plan, catalog)
+        self.assertEqual(confirmation["acceptedLicenseIds"], ["haruna"])
 
     def write_catalog(self, document: dict) -> None:
         self.catalog_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")

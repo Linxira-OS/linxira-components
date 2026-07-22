@@ -8,14 +8,16 @@ from typing import Sequence, TextIO
 
 from .backend import apply_transaction
 from .catalog import load_catalog
-from .errors import ComponentsError
+from .catalog_v3 import CatalogV3
+from .errors import ComponentsError, ValidationError
 from .jsonio import atomic_write_json, load_strict
 from .models import create_confirmation, create_request_plan
+from .selection import create_bundle_selection
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="linxira-components")
-    parser.add_argument("--version", action="version", version="%(prog)s 0.2.0")
+    parser.add_argument("--version", action="version", version="%(prog)s 0.3.0")
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     list_parser = subcommands.add_parser("list", help="list catalog profiles")
@@ -29,6 +31,8 @@ def _parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--profile", action="append", default=[], dest="profiles")
     plan_parser.add_argument("--application", action="append", default=[], dest="applications")
     plan_parser.add_argument("--selection", "--selection-document", type=Path)
+    plan_parser.add_argument("--bundle", help="select one fixed Catalog v3 bundle")
+    plan_parser.add_argument("--accept-license", action="append", default=[], dest="license_acceptances")
     plan_parser.add_argument("--output-dir", type=Path, required=True)
     plan_parser.add_argument("--output", default="request-plan.json")
 
@@ -72,12 +76,22 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.command == "plan":
         catalog = load_catalog(args.catalog, args.arch)
+        if args.bundle is not None and args.selection is not None:
+            raise ValidationError("--bundle and --selection are mutually exclusive")
+        if args.bundle is not None and not isinstance(catalog, CatalogV3):
+            raise ValidationError("--bundle requires a Catalog v3 input")
+        selection = (
+            create_bundle_selection(catalog, args.bundle)
+            if args.bundle is not None
+            else load_strict(args.selection) if args.selection is not None else None
+        )
         plan = create_request_plan(
             catalog,
             args.profiles,
             args.arch,
             application_ids=args.applications,
-            selection=load_strict(args.selection) if args.selection is not None else None,
+            selection=selection,
+            license_acceptances=args.license_acceptances,
         )
         path = atomic_write_json(args.output_dir, args.output, plan)
         _print_json({"path": str(path), "digest": plan["digest"]})

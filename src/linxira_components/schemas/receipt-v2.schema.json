@@ -4,7 +4,7 @@
   "title": "Linxira Catalog v3 transaction receipt v2",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "id", "requestPlanId", "planDigest", "status", "createdAt", "updatedAt", "message", "catalogSha256", "catalogRelease", "architecture", "finalLeafIds", "selectedBundleIds", "leafRequirements", "providerRequirements", "sourceRequirements", "pendingItems", "unsupportedItems", "directPackageTargets", "digest"],
+  "required": ["schemaVersion", "id", "requestPlanId", "planDigest", "status", "createdAt", "updatedAt", "message", "catalogSha256", "catalogRelease", "architecture", "finalLeafIds", "selectedBundleIds", "leafRequirements", "providerRequirements", "sourceRequirements", "pendingItems", "unsupportedItems", "directPackageTargets", "acceptedLicenseIds", "digest"],
   "properties": {
     "schemaVersion": {"const": "org.linxira.components.receipt.v2"},
     "id": {"type": "string", "format": "uuid"},
@@ -13,7 +13,7 @@
     "status": {"enum": ["planned", "confirmed", "applying", "succeeded", "failed", "stale", "interrupted"]},
     "createdAt": {"type": "string"}, "updatedAt": {"type": ["string", "null"]}, "message": {"type": ["string", "null"]},
     "catalogSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "catalogRelease": {"type": "string"}, "architecture": {"type": "string"},
-    "finalLeafIds": {"type": "array"}, "selectedBundleIds": {"type": "array"}, "leafRequirements": {"type": "array"}, "providerRequirements": {"type": "array"}, "sourceRequirements": {"type": "array"}, "pendingItems": {"type": "array"}, "unsupportedItems": {"type": "array"}, "directPackageTargets": {"type": "array"},
+    "finalLeafIds": {"type": "array"}, "selectedBundleIds": {"type": "array"}, "leafRequirements": {"type": "array"}, "providerRequirements": {"type": "array"}, "sourceRequirements": {"type": "array"}, "pendingItems": {"type": "array"}, "unsupportedItems": {"type": "array"}, "directPackageTargets": {"type": "array"}, "acceptedLicenseIds": {"type": "array"},
     "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
   }
 }

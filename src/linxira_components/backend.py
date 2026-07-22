@@ -11,7 +11,7 @@ from .catalog_v3 import CatalogV3
 from .errors import TransactionError, ValidationError
 from .jsonio import atomic_write_json
 from .models import Receipt, validate_confirmation
-from .selection import expand_selection
+from .selection import expand_selection, required_license_acceptances
 
 
 DEFAULT_RECEIPT_DIR = Path("/var/lib/linxira/components/receipts")
@@ -64,6 +64,10 @@ def apply_transaction(
         for field_name, expected_value in expanded.items():
             if validated[field_name] != expected_value:
                 raise ValidationError(f"confirmation {field_name} does not match Catalog v3 selection expansion")
+        if validated["acceptedLicenseIds"] != required_license_acceptances(
+            catalog, expanded["finalLeafIds"]
+        ):
+            raise ValidationError("confirmation license acceptances do not match selected Catalog leaves")
         receipt_details = {
             "catalogSha256": validated["catalogSha256"],
             "catalogRelease": validated["catalogRelease"],
@@ -76,6 +80,7 @@ def apply_transaction(
             "pendingItems": validated["pendingItems"],
             "unsupportedItems": validated["unsupportedItems"],
             "directPackageTargets": validated["directPackageTargets"],
+            "acceptedLicenseIds": validated["acceptedLicenseIds"],
         }
     else:
         if validated["schemaVersion"] != "org.linxira.components.confirmation.v1":

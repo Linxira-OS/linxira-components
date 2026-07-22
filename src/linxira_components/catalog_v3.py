@@ -27,6 +27,7 @@ class Leaf:
     available: bool
     unavailable_reason: str
     network_required: bool
+    requires_acceptance: bool
 
 
 @dataclass(frozen=True)
@@ -231,10 +232,17 @@ def load_catalog_v3(path: str | Path, architecture: str) -> CatalogV3:
                 item.get("availability", True), f"{context}.availability", architecture
             )
             packages = _parse_packages(item, context, leaf_id, provider)
+            license_info = item.get("license", {})
+            if license_info is not None and not isinstance(license_info, dict):
+                raise CatalogError(f"invalid {context}.license")
+            requires_acceptance = bool(
+                isinstance(license_info, dict) and license_info.get("requiresAcceptance") is True
+            )
             if kind == "operation" and packages:
                 raise CatalogError(f"{context} operation must not contain package targets")
             leaves[leaf_id] = Leaf(
-                leaf_id, kind, provider, source, packages, available, reason, network_required
+                leaf_id, kind, provider, source, packages, available, reason, network_required,
+                requires_acceptance
             )
 
     bundles: dict[str, Bundle] = {}

@@ -58,6 +58,69 @@ def _constraint_results(catalog: CatalogV3, selected_ids: set[str]) -> list[dict
     return sorted(results, key=lambda item: item["bundleId"])
 
 
+def create_bundle_selection(catalog: CatalogV3, bundle_id: str) -> dict[str, Any]:
+    if bundle_id not in catalog.bundles:
+        raise ValidationError(f"unknown Catalog v3 bundle: {bundle_id}")
+    requests: dict[str, set[Request]] = {}
+    active_bundles: set[str] = set()
+    visiting: set[str] = set()
+
+    def walk(current_id: str, path: tuple[str, ...]) -> None:
+        if current_id in visiting:
+            raise ValidationError(f"bundle cycle detected at {current_id}")
+        visiting.add(current_id)
+        active_bundles.add(current_id)
+        bundle = catalog.bundles[current_id]
+        for child in bundle.children:
+            selected = child.role in {"required", "recommended"} or bundle.policy != "preset"
+            if not selected:
+                continue
+            child_path = path + (child.id,)
+            if child.id in catalog.leaves:
+                leaf = catalog.leaves[child.id]
+                if not leaf.available:
+                    raise ValidationError(
+                        f"bundle {bundle_id} requires unavailable leaf {child.id}: "
+                        f"{leaf.unavailable_reason or 'no reason provided'}"
+                    )
+                requests.setdefault(child.id, set()).add(Request(child_path, child.role))
+            else:
+                walk(child.id, child_path)
+        visiting.remove(current_id)
+
+    walk(bundle_id, (bundle_id,))
+    selected_ids = sorted(requests)
+    if not selected_ids:
+        raise ValidationError(f"bundle {bundle_id} selects no available leaves")
+    document = {
+        "schemaVersion": SELECTION_SCHEMA,
+        "catalogSha256": catalog.sha256,
+        "catalogRelease": catalog.release,
+        "selectedLeafIds": selected_ids,
+        "selectedBundleIds": sorted(active_bundles),
+        "leaves": [
+            {
+                "id": leaf_id,
+                "requestedBy": sorted("/".join(request.path) for request in requests[leaf_id]),
+                "provenance": sorted({request.role for request in requests[leaf_id]}),
+            }
+            for leaf_id in selected_ids
+        ],
+        "userOverrides": [],
+        "constraintResults": _constraint_results(catalog, set(selected_ids)),
+        "providerRequirements": sorted({catalog.leaves[item].provider for item in selected_ids}),
+        "sourceRequirements": sorted({catalog.leaves[item].source for item in selected_ids}),
+    }
+    return validate_selection(document, catalog)
+
+
+def required_license_acceptances(catalog: CatalogV3, leaf_ids: list[str] | tuple[str, ...]) -> list[str]:
+    return sorted(
+        leaf_id for leaf_id in leaf_ids
+        if leaf_id in catalog.leaves and catalog.leaves[leaf_id].requires_acceptance
+    )
+
+
 def validate_selection(document: Any, catalog: CatalogV3) -> dict[str, Any]:
     expected = {
         "schemaVersion", "catalogSha256", "catalogRelease", "selectedLeafIds",

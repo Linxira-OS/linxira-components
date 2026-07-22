@@ -10,7 +10,7 @@ from .catalog import Catalog, ID_RE, PACKAGE_RE
 from .catalog_v3 import CatalogV3, STABLE_ID_RE
 from .errors import CatalogDriftError, DigestError, InvalidTransitionError, ValidationError
 from .jsonio import document_digest
-from .selection import expand_selection
+from .selection import expand_selection, required_license_acceptances
 
 
 PLAN_SCHEMA = "org.linxira.components.request-plan.v1"
@@ -78,6 +78,7 @@ def create_request_plan(
     *,
     application_ids: list[str] | tuple[str, ...] = (),
     selection: Any | None = None,
+    license_acceptances: list[str] | tuple[str, ...] = (),
     clock: Clock = utc_now,
     id_factory: Callable[[], Any] = uuid4,
 ) -> dict[str, Any]:
@@ -89,6 +90,12 @@ def create_request_plan(
         if selection is None:
             raise ValidationError("Catalog v3 planning requires a selection document")
         expanded = expand_selection(selection, catalog)
+        accepted_license_ids = sorted(set(license_acceptances))
+        required_acceptances = required_license_acceptances(catalog, expanded["finalLeafIds"])
+        if accepted_license_ids != required_acceptances:
+            raise ValidationError(
+                "acceptedLicenseIds must exactly match selected leaves requiring license acceptance"
+            )
         document = {
             "schemaVersion": PLAN_V2_SCHEMA,
             "id": str(id_factory()),
@@ -97,6 +104,7 @@ def create_request_plan(
             "catalogRelease": catalog.release,
             "architecture": architecture,
             "selection": selection,
+            "acceptedLicenseIds": accepted_license_ids,
             **expanded,
             "systemUpgradeRequired": False,
         }
@@ -176,7 +184,7 @@ def validate_request_plan(document: Any, *, catalog_sha256: str | None = None) -
 V3_MATERIAL_FIELDS = {
     "selection", "finalLeafIds", "selectedBundleIds", "leafRequirements",
     "providerRequirements", "sourceRequirements", "pendingItems", "unsupportedItems",
-    "directPackageTargets", "networkRequired", "systemUpgradeRequired",
+    "directPackageTargets", "acceptedLicenseIds", "networkRequired", "systemUpgradeRequired",
 }
 
 
@@ -184,6 +192,7 @@ def _validate_v3_material(document: dict[str, Any], *, context: str) -> None:
     for field_name in (
         "finalLeafIds", "selectedBundleIds", "providerRequirements", "sourceRequirements",
         "pendingItems", "unsupportedItems", "directPackageTargets",
+        "acceptedLicenseIds",
     ):
         values = document[field_name]
         if not isinstance(values, list) or not all(isinstance(item, str) and item for item in values):
@@ -194,6 +203,8 @@ def _validate_v3_material(document: dict[str, Any], *, context: str) -> None:
         raise ValidationError(f"{context} finalLeafIds must be non-empty")
     if not all(STABLE_ID_RE.fullmatch(value) for value in document["finalLeafIds"] + document["selectedBundleIds"]):
         raise ValidationError(f"{context} contains an invalid stable ID")
+    if not all(STABLE_ID_RE.fullmatch(value) for value in document["acceptedLicenseIds"]):
+        raise ValidationError(f"{context} contains an invalid accepted license ID")
     if not all(PACKAGE_RE.fullmatch(value) for value in document["directPackageTargets"]):
         raise ValidationError(f"{context} contains an invalid package target")
     if not isinstance(document["selection"], dict):
@@ -277,6 +288,10 @@ def create_confirmation(
         for field_name, expected_value in expanded.items():
             if validated[field_name] != expected_value:
                 raise ValidationError(f"request plan {field_name} does not match Catalog v3 selection expansion")
+        if validated["acceptedLicenseIds"] != required_license_acceptances(
+            catalog, expanded["finalLeafIds"]
+        ):
+            raise ValidationError("request plan license acceptances do not match selected Catalog leaves")
         document = {
             "schemaVersion": CONFIRMATION_V2_SCHEMA,
             "id": str(id_factory()),

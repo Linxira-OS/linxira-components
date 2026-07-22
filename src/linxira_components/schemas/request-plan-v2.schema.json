@@ -4,7 +4,7 @@
   "title": "Linxira Catalog v3 request plan v2",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "id", "createdAt", "catalogSha256", "catalogRelease", "architecture", "selection", "finalLeafIds", "selectedBundleIds", "leafRequirements", "providerRequirements", "sourceRequirements", "pendingItems", "unsupportedItems", "directPackageTargets", "networkRequired", "systemUpgradeRequired", "digest"],
+  "required": ["schemaVersion", "id", "createdAt", "catalogSha256", "catalogRelease", "architecture", "selection", "finalLeafIds", "selectedBundleIds", "leafRequirements", "providerRequirements", "sourceRequirements", "pendingItems", "unsupportedItems", "directPackageTargets", "acceptedLicenseIds", "networkRequired", "systemUpgradeRequired", "digest"],
   "properties": {
     "schemaVersion": {"const": "org.linxira.components.request-plan.v2"},
     "id": {"type": "string", "format": "uuid"},
@@ -21,6 +21,7 @@
     "pendingItems": {"$ref": "#/$defs/ids"},
     "unsupportedItems": {"$ref": "#/$defs/ids"},
     "directPackageTargets": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9@._+-]+$"}},
+    "acceptedLicenseIds": {"$ref": "#/$defs/ids"},
     "networkRequired": {"type": "boolean"},
     "systemUpgradeRequired": {"const": false},
     "digest": {"$ref": "#/$defs/sha256"}
