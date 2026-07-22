@@ -17,7 +17,7 @@ from .selection import create_bundle_selection
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="linxira-components")
-    parser.add_argument("--version", action="version", version="%(prog)s 0.3.0")
+    parser.add_argument("--version", action="version", version="%(prog)s 0.4.0")
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     list_parser = subcommands.add_parser("list", help="list catalog profiles")

@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=org.linxira.Components1
+Exec=/usr/bin/false
+User=root
+SystemdService=linxira-components.service

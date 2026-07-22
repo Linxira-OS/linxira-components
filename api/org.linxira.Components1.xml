@@ -1,19 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Review draft only. This repository does not install or activate a service. -->
 <node name="/org/linxira/Components1">
   <interface name="org.linxira.Components1">
-    <method name="Apply">
-      <arg name="confirmationJson" type="s" direction="in"/>
-      <arg name="receiptId" type="s" direction="out"/>
+    <method name="CreateSystemPlan">
+      <arg name="operationId" type="s" direction="in"/>
+      <arg name="parametersJson" type="s" direction="in"/>
+      <arg name="planId" type="s" direction="out"/>
+      <arg name="planJson" type="s" direction="out"/>
     </method>
-    <method name="GetReceipt">
+    <method name="ConfirmAndApplySystemPlan">
+      <arg name="planId" type="s" direction="in"/>
+      <arg name="planDigest" type="s" direction="in"/>
+      <arg name="receiptId" type="s" direction="out"/>
+      <arg name="receiptJson" type="s" direction="out"/>
+    </method>
+    <method name="GetSystemReceipt">
       <arg name="receiptId" type="s" direction="in"/>
       <arg name="receiptJson" type="s" direction="out"/>
     </method>
-    <signal name="ReceiptChanged">
-      <arg name="receiptId" type="s"/>
-      <arg name="status" type="s"/>
-    </signal>
-    <property name="InterfaceVersion" type="u" access="read"/>
+    <method name="GetInterfaceVersion">
+      <arg name="version" type="u" direction="out"/>
+    </method>
   </interface>
 </node>

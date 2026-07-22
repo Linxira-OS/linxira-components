@@ -33,9 +33,13 @@ persists durable receipts.
 - Receipts are written atomically under
   `/var/lib/linxira/components/receipts` before and after each state transition.
 
-The API XML and Polkit policy remain review drafts. Phase 1 uses an explicit
-`pkexec linxira-components apply` boundary owned by Package Center; packaging
-does not install a D-Bus service.
+The packaged system D-Bus service owns fixed system-tool transactions below
+`/var/lib/linxira/components/system-transactions`. It accepts operation IDs and strict JSON
+parameters, binds short-lived plans to the caller UID, machine ID, boot ID, and
+operation registry digest, checks Polkit authorization, and writes immutable
+receipts. The initial registry exposes only pacman-lock diagnosis and live-chroot
+readiness inspection; neither operation mutates the system. Package Center
+continues to use its catalog-bound `pkexec linxira-components apply` boundary.
 
 ## CLI
 
@@ -65,11 +69,13 @@ requirements, and pending/unsupported IDs.
 
 ## Development
 
-No runtime or test dependencies are required:
+The core unit suite has no extra Python dependencies. The optional D-Bus smoke
+test requires `python-dbus`, `python-gobject`, `pytest`, and `dbus-run-session`:
 
 ```console
 python -m unittest discover -s tests -v
 python -m compileall -q src tests
+PYTHONPATH=src dbus-run-session python -m pytest -q tests/test_dbus_service.py
 ```
 
 The production transaction design and its trust boundary are documented in

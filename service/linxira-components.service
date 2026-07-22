@@ -1,0 +1,24 @@
+[Unit]
+Description=Linxira fixed system transaction service
+After=dbus.service
+
+[Service]
+Type=dbus
+BusName=org.linxira.Components1
+ExecStart=/usr/bin/linxira-components-service
+User=root
+Group=root
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+StateDirectory=linxira/components/system-transactions
+StateDirectoryMode=0750
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

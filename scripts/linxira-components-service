@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+export PYTHONPATH=/usr/lib/linxira-components
+exec /usr/bin/python -c 'from linxira_components.service import main; raise SystemExit(main())'

@@ -1,21 +1,25 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!--
-  REVIEW DRAFT ONLY. Do not install this file or enable a service from it.
-  Final policy text, vendor URL, localization, and packaging require review.
--->
-<!DOCTYPE policyconfig PUBLIC
-  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
   "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
   <vendor>Linxira OS</vendor>
-  <action id="org.linxira.components.apply">
-    <description>Apply a confirmed Linxira component transaction</description>
-    <message>Authentication is required to apply this component transaction</message>
+  <vendor_url>https://linxira.org/</vendor_url>
+  <action id="org.linxira.components.inspect">
+    <description>Inspect a fixed Linxira system operation plan</description>
+    <message>Authentication is required to inspect this system operation</message>
     <defaults>
       <allow_any>no</allow_any>
       <allow_inactive>no</allow_inactive>
-      <allow_active>auth_admin_keep</allow_active>
+      <allow_active>yes</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.allow_gui">false</annotate>
+  </action>
+  <action id="org.linxira.components.recovery">
+    <description>Run a fixed Linxira recovery diagnostic</description>
+    <message>Authentication is required to run this recovery diagnostic</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
   </action>
 </policyconfig>
