@@ -38,7 +38,8 @@ The packaged system D-Bus service owns fixed system-tool transactions below
 parameters, binds short-lived plans to the caller UID, machine ID, boot ID, and
 operation registry digest, checks Polkit authorization, and writes immutable
 receipts. The initial registry exposes only pacman-lock diagnosis and live-chroot
-readiness inspection; neither operation mutates the system. Package Center
+readiness inspection and strict hardware/driver-state diagnosis; none of these
+operations mutates the system. Package Center
 continues to use its catalog-bound `pkexec linxira-components apply` boundary.
 
 ## CLI

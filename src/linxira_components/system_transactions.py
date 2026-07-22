@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import signal
 import stat
 import subprocess
 import threading
@@ -19,7 +20,7 @@ from .jsonio import document_digest
 
 PLAN_SCHEMA = "org.linxira.components.system-plan.v1"
 RECEIPT_SCHEMA = "org.linxira.components.system-receipt.v1"
-REGISTRY_VERSION = "2026.07.22.1"
+REGISTRY_VERSION = "2026.07.22.2"
 PACMAN_PROCESSES = frozenset({"pacman", "makepkg", "yay", "paru", "pikaur", "packagekitd"})
 OPERATIONS = {
     "org.linxira.recovery.pacman-lock-diagnose.v1": {
@@ -34,6 +35,12 @@ OPERATIONS = {
         "risk": "read-only",
         "rollback": "not-applicable",
     },
+    "org.linxira.hardware.driver-state-diagnose.v1": {
+        "action": "org.linxira.components.inspect",
+        "lockDomain": "hardware-diagnostics",
+        "risk": "read-only",
+        "rollback": "not-applicable",
+    },
 }
 REGISTRY_DIGEST = hashlib.sha256(
     json.dumps({"version": REGISTRY_VERSION, "operations": OPERATIONS}, sort_keys=True).encode()
@@ -41,6 +48,18 @@ REGISTRY_DIGEST = hashlib.sha256(
 ID_RE = re.compile(r"^[0-9a-f-]{36}$")
 MACHINE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 BOOT_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+SEMVER_RE = re.compile(
+    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(?:-(?:(?:0|[1-9][0-9]*)|(?:[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))"
+    r"(?:\.(?:(?:0|[1-9][0-9]*)|(?:[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)))*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
+PCI_BUS_RE = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$")
+PCI_ID_RE = re.compile(r"^[0-9a-f]{4}$")
+HARDWARE_PROFILE_IDS = frozenset({
+    "cpu.amd", "cpu.intel", "graphics.amd", "graphics.hybrid", "graphics.intel",
+    "graphics.nvidia", "vm.hyperv", "vm.qemu", "vm.virtualbox", "vm.vmware", "vm.xen",
+})
 MAX_PLANS_PER_UID = 128
 MAX_SYSTEM_PLANS = 4096
 PLAN_RETENTION = timedelta(days=30)
@@ -82,6 +101,80 @@ def _read_text(path: Path, limit: int = 4096) -> str:
             return stream.read(limit).decode("utf-8", errors="replace").strip("\x00\r\n ")
     except OSError:
         return ""
+
+
+def _bounded_process(command: list[str], *, limit: int, timeout: int, env: dict[str, str]):
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=False,
+        env=env,
+        start_new_session=os.name == "posix",
+    )
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+    size = 0
+    exceeded = threading.Event()
+    size_lock = threading.Lock()
+
+    def kill_group() -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except ProcessLookupError:
+            pass
+
+    def read_output(stream, chunks) -> None:
+        nonlocal size
+        while True:
+            chunk = stream.read(64 * 1024)
+            if not chunk:
+                return
+            with size_lock:
+                size += len(chunk)
+                if size > limit:
+                    exceeded.set()
+                    kill_group()
+                    return
+            chunks.append(chunk)
+
+    assert process.stdout is not None and process.stderr is not None
+    readers = (
+        threading.Thread(target=read_output, args=(process.stdout, stdout_chunks), daemon=True),
+        threading.Thread(target=read_output, args=(process.stderr, stderr_chunks), daemon=True),
+    )
+    for reader in readers:
+        reader.start()
+    timed_out = False
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        kill_group()
+        returncode = process.wait()
+    for reader in readers:
+        reader.join(timeout=5)
+    if any(reader.is_alive() for reader in readers):
+        kill_group()
+        process.stdout.close()
+        process.stderr.close()
+        for reader in readers:
+            reader.join(timeout=5)
+    streams_open = any(reader.is_alive() for reader in readers)
+    process.stdout.close()
+    process.stderr.close()
+    if streams_open:
+        raise ValidationError("hardware detector output streams did not close")
+    if timed_out:
+        raise subprocess.TimeoutExpired(command, timeout)
+    if exceeded.is_set():
+        raise ValidationError("hardware detector output exceeds size limit")
+    return subprocess.CompletedProcess(
+        command, returncode, b"".join(stdout_chunks), b"".join(stderr_chunks)
+    )
 
 
 class SystemTransactionStore:
@@ -195,6 +288,145 @@ class SystemTransactionStore:
         )
         return {"mount": mount, "checks": checks, "ready": mount is not None and all(checks.values())}
 
+    def _hardware_driver_evidence(self) -> dict[str, Any]:
+        command = ["/usr/bin/linxira-chwd-detector"]
+        try:
+            environment = {"PATH": "/usr/bin", "LC_ALL": "C"}
+            if self.runner is subprocess.run:
+                result = _bounded_process(command, limit=512 * 1024, timeout=10, env=environment)
+            else:
+                result = self.runner(
+                    command, check=False, capture_output=True, text=True, timeout=10,
+                    shell=False, env=environment,
+                )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValidationError("hardware detector is unavailable") from exc
+        raw_value = result.stdout or b""
+        raw_bytes = raw_value.encode("utf-8") if isinstance(raw_value, str) else raw_value
+        try:
+            raw = raw_bytes.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise ValidationError("hardware detector output is not valid UTF-8") from exc
+        if result.returncode != 0:
+            raise ValidationError(f"hardware detector failed with status {result.returncode}")
+        if len(raw_bytes) > 512 * 1024:
+            raise ValidationError("hardware detector output exceeds size limit")
+
+        def reject_duplicates(pairs):
+            value = {}
+            for key, item in pairs:
+                if key in value:
+                    raise ValidationError(f"duplicate hardware detector field: {key}")
+                value[key] = item
+            return value
+
+        try:
+            document = json.loads(raw, object_pairs_hook=reject_duplicates)
+        except json.JSONDecodeError as exc:
+            raise ValidationError("hardware detector returned invalid JSON") from exc
+        self._validate_hardware_document(document)
+        return {
+            "detector": document["detector"],
+            "evidence": document["evidence"],
+            "profileIds": document["profile_ids"],
+            "warnings": document["warnings"],
+            "rawSha256": hashlib.sha256(raw_bytes).hexdigest(),
+        }
+
+    @staticmethod
+    def _validate_hardware_document(document: Any) -> None:
+        def exact(value: Any, name: str, keys: set[str]) -> dict[str, Any]:
+            if not isinstance(value, dict) or set(value) != keys:
+                raise ValidationError(f"hardware detector {name} has invalid fields")
+            return value
+
+        root = exact(
+            document, "root", {"schema_version", "detector", "evidence", "profile_ids", "warnings"}
+        )
+        if type(root["schema_version"]) is not int or root["schema_version"] != 1:
+            raise ValidationError("hardware detector schema version is unsupported")
+        metadata = exact(root["detector"], "metadata", {"name", "version", "upstream_chwd"})
+        if metadata["name"] != "linxira-chwd-detector":
+            raise ValidationError("hardware detector identity is invalid")
+        if not all(
+            isinstance(metadata[key], str) and SEMVER_RE.fullmatch(metadata[key])
+            for key in ("version", "upstream_chwd")
+        ):
+            raise ValidationError("hardware detector version is invalid")
+        evidence = exact(root["evidence"], "evidence", {"pci", "dmi", "cpu", "virtualization"})
+        if not isinstance(evidence["pci"], list) or len(evidence["pci"]) > 4096:
+            raise ValidationError("hardware detector PCI evidence is invalid")
+        for item in evidence["pci"]:
+            device = exact(item, "PCI device", {"bus_id", "class_id", "vendor_id", "device_id"})
+            if (
+                not isinstance(device["bus_id"], str)
+                or not PCI_BUS_RE.fullmatch(device["bus_id"])
+                or not all(
+                    isinstance(device[key], str) and PCI_ID_RE.fullmatch(device[key])
+                    for key in ("class_id", "vendor_id", "device_id")
+                )
+            ):
+                raise ValidationError("hardware detector PCI value is invalid")
+        bus_ids = [item["bus_id"] for item in evidence["pci"]]
+        if bus_ids != sorted(set(bus_ids)):
+            raise ValidationError("hardware detector PCI devices are not sorted and unique")
+        for name, keys in (
+            ("dmi", {"system_vendor", "product_name", "chassis_type"}),
+            ("cpu", {"vendor", "family", "model"}),
+        ):
+            item = exact(evidence[name], name, keys)
+            if not all(
+                value is None or (isinstance(value, str) and "\x00" not in value and len(value) <= 1024)
+                for value in item.values()
+            ):
+                raise ValidationError(f"hardware detector {name} value is invalid")
+        virtualization_profiles = {
+            "kvm": "vm.qemu", "qemu": "vm.qemu", "oracle": "vm.virtualbox",
+            "vmware": "vm.vmware", "microsoft": "vm.hyperv", "xen": "vm.xen",
+        }
+        if evidence["virtualization"] is not None and evidence["virtualization"] not in virtualization_profiles:
+            raise ValidationError("hardware detector virtualization value is invalid")
+        profiles = root["profile_ids"]
+        if (
+            not isinstance(profiles, list)
+            or not all(isinstance(item, str) for item in profiles)
+            or profiles != sorted(set(profiles))
+            or not set(profiles).issubset(HARDWARE_PROFILE_IDS)
+        ):
+            raise ValidationError("hardware detector profile IDs are invalid")
+        expected_profiles = set()
+        graphics_vendors = set()
+        for device in evidence["pci"]:
+            if device["class_id"] not in {"0300", "0302", "0380"}:
+                continue
+            graphics_vendors.add(device["vendor_id"])
+            profile = {"1002": "graphics.amd", "8086": "graphics.intel", "10de": "graphics.nvidia"}.get(
+                device["vendor_id"]
+            )
+            if profile:
+                expected_profiles.add(profile)
+        if len(graphics_vendors) > 1:
+            expected_profiles.add("graphics.hybrid")
+        cpu_profile = {
+            "genuineintel": "cpu.intel", "authenticamd": "cpu.amd",
+        }.get((evidence["cpu"]["vendor"] or "").lower())
+        if cpu_profile:
+            expected_profiles.add(cpu_profile)
+        if evidence["virtualization"] is not None:
+            expected_profiles.add(virtualization_profiles[evidence["virtualization"]])
+        if profiles != sorted(expected_profiles):
+            raise ValidationError("hardware detector profile IDs do not match evidence")
+        warnings = root["warnings"]
+        if not isinstance(warnings, list) or len(warnings) > 1024:
+            raise ValidationError("hardware detector warnings are invalid")
+        for item in warnings:
+            warning = exact(item, "warning", {"source", "message"})
+            if not all(isinstance(value, str) for value in warning.values()):
+                raise ValidationError("hardware detector warning is invalid")
+        warning_keys = [(item["source"], item["message"]) for item in warnings]
+        if warning_keys != sorted(set(warning_keys)):
+            raise ValidationError("hardware detector warnings are not sorted and unique")
+
     @staticmethod
     def _fixed_regular_file(root: Path, relative: str) -> bool:
         current = root
@@ -215,6 +447,8 @@ class SystemTransactionStore:
             return self._pacman_lock_evidence()
         if operation_id == "org.linxira.recovery.live-chroot-readiness.v1":
             return self._live_readiness_evidence()
+        if operation_id == "org.linxira.hardware.driver-state-diagnose.v1":
+            return self._hardware_driver_evidence()
         raise ValidationError(f"unsupported system operation: {operation_id}")
 
     def _path(self, collection: str, identifier: str) -> Path:

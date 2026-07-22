@@ -1,9 +1,11 @@
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import os
 import tempfile
 import unittest
 from unittest import mock
+import sys
 
 from linxira_components.errors import ValidationError
 from linxira_components.jsonio import document_digest
@@ -11,11 +13,13 @@ from linxira_components.system_transactions import (
     PLAN_SCHEMA,
     RECEIPT_SCHEMA,
     SystemTransactionStore,
+    _bounded_process,
 )
 
 
 LOCK_OPERATION = "org.linxira.recovery.pacman-lock-diagnose.v1"
 LIVE_OPERATION = "org.linxira.recovery.live-chroot-readiness.v1"
+HARDWARE_OPERATION = "org.linxira.hardware.driver-state-diagnose.v1"
 
 
 class MutableClock:
@@ -111,6 +115,67 @@ class SystemTransactionTests(unittest.TestCase):
         self.assertFalse(plan["preState"]["checks"]["/mnt/etc/pacman.conf"])
         self.assertFalse(plan["preState"]["ready"])
 
+    def test_hardware_diagnosis_uses_fixed_detector_and_strict_document(self):
+        detector = {
+            "schema_version": 1,
+            "detector": {"name": "linxira-chwd-detector", "version": "0.1.0", "upstream_chwd": "1.23.0"},
+            "evidence": {
+                "pci": [{"bus_id": "0000:00:08.0", "class_id": "0300", "vendor_id": "1414", "device_id": "5353"}],
+                "dmi": {"system_vendor": "Microsoft Corporation", "product_name": "Virtual Machine", "chassis_type": "3"},
+                "cpu": {"vendor": "GenuineIntel", "family": "6", "model": "106"},
+                "virtualization": "microsoft",
+            },
+            "profile_ids": ["cpu.intel", "vm.hyperv"],
+            "warnings": [],
+        }
+        runner = mock.Mock(return_value=mock.Mock(
+            returncode=0, stdout=json.dumps(detector), stderr="",
+        ))
+        store = SystemTransactionStore(self.state / "hardware", self.root, runner=runner, clock=self.clock)
+        plan = store.create_plan(HARDWARE_OPERATION, "{}", 1000)
+        self.assertEqual(plan["preState"]["profileIds"], ["cpu.intel", "vm.hyperv"])
+        receipt = store.confirm_and_apply(plan["id"], plan["digest"], 1000)
+        self.assertFalse(receipt["changed"])
+        for call in runner.call_args_list:
+            self.assertEqual(call.args[0], ["/usr/bin/linxira-chwd-detector"])
+            self.assertFalse(call.kwargs["shell"])
+            self.assertEqual(call.kwargs["env"], {"PATH": "/usr/bin", "LC_ALL": "C"})
+
+        runner.return_value.stdout = '{"schema_version":1,"schema_version":1}'
+        with self.assertRaisesRegex(ValidationError, "duplicate hardware"):
+            store.create_plan(HARDWARE_OPERATION, "{}", 1000)
+
+        malformed = json.loads(json.dumps(detector))
+        malformed["profile_ids"] = ["graphics.nvidia"]
+        runner.return_value.stdout = json.dumps(malformed)
+        with self.assertRaisesRegex(ValidationError, "do not match evidence"):
+            store.create_plan(HARDWARE_OPERATION, "{}", 1000)
+
+        malformed = json.loads(json.dumps(detector))
+        malformed["evidence"]["pci"][0]["bus_id"] = "outside"
+        runner.return_value.stdout = json.dumps(malformed)
+        with self.assertRaisesRegex(ValidationError, "PCI value"):
+            store.create_plan(HARDWARE_OPERATION, "{}", 1000)
+
+        malformed = json.loads(json.dumps(detector))
+        malformed["detector"]["version"] = "01.0.0"
+        runner.return_value.stdout = json.dumps(malformed)
+        with self.assertRaisesRegex(ValidationError, "version"):
+            store.create_plan(HARDWARE_OPERATION, "{}", 1000)
+
+        runner.return_value.stdout = b'{"schema_version":1,"value":"\xff"}'
+        with self.assertRaisesRegex(ValidationError, "valid UTF-8"):
+            store.create_plan(HARDWARE_OPERATION, "{}", 1000)
+
+    def test_bounded_process_rejects_combined_output_limit(self):
+        with self.assertRaisesRegex(ValidationError, "size limit"):
+            _bounded_process(
+                [sys.executable, "-c", "import sys; sys.stdout.write('x' * 2048)"],
+                limit=128,
+                timeout=10,
+                env=dict(os.environ),
+            )
+
     def test_missing_and_tampered_documents_fail_closed(self):
         with self.assertRaisesRegex(ValidationError, "does not exist"):
             self.store.get_receipt("00000000-0000-0000-0000-000000000000", 1000)
@@ -172,6 +237,17 @@ class SystemTransactionTests(unittest.TestCase):
         state_path.chmod(0o600)
         SystemTransactionStore(self.state, self.root, clock=self.clock)
         self.assertEqual(json.loads(state_path.read_text())["status"], "interrupted")
+
+    def test_installed_hardware_detector_integration(self):
+        detector = Path("/usr/bin/linxira-chwd-detector")
+        if not detector.is_file() or not os.access(detector, os.X_OK):
+            self.skipTest("installed Linxira hardware detector is unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            store = SystemTransactionStore(Path(directory), Path("/"))
+            plan = store.create_plan(HARDWARE_OPERATION, "{}", 1000)
+            receipt = store.confirm_and_apply(plan["id"], plan["digest"], 1000)
+        self.assertEqual(receipt["status"], "succeeded")
+        self.assertIsInstance(receipt["verifiedState"]["profileIds"], list)
 
 
 if __name__ == "__main__":
