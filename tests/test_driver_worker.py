@@ -39,6 +39,8 @@ class FixedResults:
             })()
         if command[:3] == ["/usr/bin/pacman", "--query", "--"]:
             return type("Result", (), {"returncode": 1, "stdout": "", "stderr": ""})()
+        if command[:2] == ["/usr/bin/systemctl", "is-enabled"]:
+            return type("Result", (), {"returncode": 1, "stdout": "not-found\n", "stderr": ""})()
         raise AssertionError(command)
 
 
@@ -113,6 +115,10 @@ class DriverWorkerTests(unittest.TestCase):
                 return type("Result", (), {"returncode": 0, "stdout": "downloaded"})()
             if command[0] == "/usr/bin/pacman-key":
                 return type("Result", (), {"returncode": 0, "stdout": "valid"})()
+            if command[:2] == ["/usr/bin/systemctl", "enable"]:
+                return type("Result", (), {"returncode": 0, "stdout": "enabled"})()
+            if command[:2] == ["/usr/bin/systemctl", "is-enabled"]:
+                return type("Result", (), {"returncode": 0, "stdout": "enabled\n"})()
             if "--upgrade" in command:
                 return type("Result", (), {"returncode": 0, "stdout": "installed"})()
             if command[:2] == ["/usr/bin/pacman", "--query"]:
@@ -137,6 +143,9 @@ class DriverWorkerTests(unittest.TestCase):
         )
         self.assertTrue(result["changed"])
         self.assertEqual(result["snapshot"]["name"], "2026-07-22_12-00-00")
+        self.assertEqual(result["verifiedState"]["services"], {
+            "hv_kvp_daemon.service": "enabled", "hv_vss_daemon.service": "enabled",
+        })
         self.assertFalse(any(command[:2] == ["/usr/bin/pacman", "--upgrade"] for command in calls))
         download = next(command for command in calls if "--downloadonly" in command)
         self.assertIn("--disable-sandbox", download)

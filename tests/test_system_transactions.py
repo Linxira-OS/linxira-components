@@ -190,7 +190,12 @@ class SystemTransactionTests(unittest.TestCase):
             "planId": "", "planDigest": "", "operationId": HYPERV_OPERATION,
             "status": "succeeded", "changed": True,
             "snapshot": {"name": "2026-07-22_12-00-00", "comment": "", "tag": "O"},
-            "verifiedState": {"artifacts": [{"name": "hyperv", "version": "6.15-1"}]},
+            "verifiedState": {
+                "artifacts": [{"name": "hyperv", "version": "6.15-1"}],
+                "services": {
+                    "hv_kvp_daemon.service": "enabled", "hv_vss_daemon.service": "enabled",
+                },
+            },
             "rollback": "timeshift-restore-requires-separate-authorization-and-reboot",
         }
         executor = mock.Mock()

@@ -23,6 +23,7 @@ SNAPSHOT_RE = re.compile(
     r"\s+(?P<tags>[OBHDWM]+)\s+(?P<comment>.*)$"
 )
 RunFixed = Callable[[list[str], int, int], subprocess.CompletedProcess]
+HYPERV_SERVICES = ("hv_kvp_daemon.service", "hv_vss_daemon.service")
 
 
 def _strict_object(path: Path, limit: int = 128 * 1024) -> dict[str, Any]:
@@ -208,6 +209,14 @@ def _installed_version(run: RunFixed) -> str | None:
     return fields[1]
 
 
+def _service_state(run: RunFixed, service: str) -> str:
+    result = run(["/usr/bin/systemctl", "is-enabled", service], 10, 64 * 1024)
+    value = result.stdout.strip()
+    if value in {"enabled", "enabled-runtime", "disabled", "static", "masked", "not-found"}:
+        return value
+    return "unavailable"
+
+
 def collect_hyperv_prestate(
     root: Path, run: RunFixed, hardware: dict[str, Any], package_lock: dict[str, Any]
 ) -> dict[str, Any]:
@@ -239,6 +248,7 @@ def collect_hyperv_prestate(
             "syncDatabaseSha256": _sync_database_digest(root),
         },
         "packageLock": package_lock,
+        "services": {service: _service_state(run, service) for service in HYPERV_SERVICES},
     }
     expected = next(item["version"] for item in state["package"]["artifacts"] if item["name"] == "hyperv")
     if state["package"]["installedVersion"] == expected:
@@ -373,6 +383,12 @@ def apply_hyperv(
             install_started = True
 
         commit_packages(package_paths, create_snapshot_with_alpm_lock)
+        enable = run(["/usr/bin/systemctl", "enable", *HYPERV_SERVICES], 30, 128 * 1024)
+        if enable.returncode != 0:
+            raise ValidationError("Hyper-V integration services could not be enabled")
+        services = {service: _service_state(run, service) for service in HYPERV_SERVICES}
+        if any(state != "enabled" for state in services.values()):
+            raise ValidationError("Hyper-V integration service enablement failed verification")
         verified = []
         for artifact in plan["preState"]["package"]["artifacts"]:
             verify = run(["/usr/bin/pacman", "--query", "--", artifact["name"]], 10, 64 * 1024)
@@ -384,7 +400,7 @@ def apply_hyperv(
             "schemaVersion": RESULT_SCHEMA,
             "planId": plan["id"], "planDigest": plan["digest"], "operationId": HYPERV_OPERATION,
             "status": "succeeded", "changed": True, "snapshot": snapshot,
-            "verifiedState": {"artifacts": verified},
+            "verifiedState": {"artifacts": verified, "services": services},
             "rollback": "timeshift-restore-requires-separate-authorization-and-reboot",
         }
     except ValidationError as exc:
@@ -413,7 +429,8 @@ def validate_result(result: dict[str, Any], plan: dict[str, Any]) -> dict[str, A
         "artifacts": [
             {"name": item["name"], "version": item["version"]}
             for item in plan["preState"]["package"]["artifacts"]
-        ]
+        ],
+        "services": {service: "enabled" for service in HYPERV_SERVICES},
     }
     if result["status"] == "succeeded" and (
         result["changed"] is not True or result.get("verifiedState") != expected_verified
