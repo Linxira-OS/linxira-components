@@ -20,6 +20,7 @@ from linxira_components.system_transactions import (
 LOCK_OPERATION = "org.linxira.recovery.pacman-lock-diagnose.v1"
 LIVE_OPERATION = "org.linxira.recovery.live-chroot-readiness.v1"
 HARDWARE_OPERATION = "org.linxira.hardware.driver-state-diagnose.v1"
+HYPERV_OPERATION = "org.linxira.driver.vm-hyperv-guest.v1"
 
 
 class MutableClock:
@@ -176,6 +177,39 @@ class SystemTransactionTests(unittest.TestCase):
                 env=dict(os.environ),
             )
 
+    def test_hyperv_mutation_requires_worker_and_creates_snapshot_bound_receipt(self):
+        prestate = {
+            "hardware": {"profileIds": ["vm.hyperv"]},
+            "snapshot": {"ready": True},
+            "package": {"target": "hyperv", "artifacts": [
+                {"name": "hyperv", "version": "6.15-1"},
+            ]},
+        }
+        result = {
+            "schemaVersion": "org.linxira.components.system-worker-result.v1",
+            "planId": "", "planDigest": "", "operationId": HYPERV_OPERATION,
+            "status": "succeeded", "changed": True,
+            "snapshot": {"name": "2026-07-22_12-00-00", "comment": "", "tag": "O"},
+            "verifiedState": {"artifacts": [{"name": "hyperv", "version": "6.15-1"}]},
+            "rollback": "timeshift-restore-requires-separate-authorization-and-reboot",
+        }
+        executor = mock.Mock()
+        store = SystemTransactionStore(
+            self.state / "hyperv", self.root, clock=self.clock, mutation_executor=executor,
+        )
+        with mock.patch.object(store, "_evidence", return_value=prestate):
+            plan = store.create_plan(HYPERV_OPERATION, "{}", 1000)
+            result["planId"] = plan["id"]
+            result["planDigest"] = plan["digest"]
+            result["snapshot"]["comment"] = f"linxira-pre-change-{plan['id']}"
+            result["digest"] = document_digest(result)
+            executor.return_value = result
+            receipt = store.confirm_and_apply(plan["id"], plan["digest"], 1000)
+        self.assertEqual(store.operation_action(HYPERV_OPERATION), "org.linxira.components.driver")
+        self.assertTrue(receipt["changed"])
+        self.assertEqual(receipt["snapshot"]["name"], "2026-07-22_12-00-00")
+        executor.assert_called_once_with(plan)
+
     def test_missing_and_tampered_documents_fail_closed(self):
         with self.assertRaisesRegex(ValidationError, "does not exist"):
             self.store.get_receipt("00000000-0000-0000-0000-000000000000", 1000)
@@ -238,6 +272,39 @@ class SystemTransactionTests(unittest.TestCase):
         SystemTransactionStore(self.state, self.root, clock=self.clock)
         self.assertEqual(json.loads(state_path.read_text())["status"], "interrupted")
 
+    def test_startup_recovers_driver_snapshot_after_worker_result_crash(self):
+        store = SystemTransactionStore(self.state / "worker-recovery", self.root, clock=self.clock)
+        prestate = {
+            "hardware": {"profileIds": ["vm.hyperv"]},
+            "snapshot": {"ready": True},
+            "package": {"target": "hyperv", "artifacts": [
+                {"name": "hyperv", "version": "6.15-1"},
+            ]},
+        }
+        with mock.patch.object(store, "_evidence", return_value=prestate):
+            plan = store.create_plan(HYPERV_OPERATION, "{}", 1000)
+        state_path = store._path("state", plan["id"])
+        store._replace(state_path, {"id": plan["id"], "status": "applying", "updatedAt": plan["createdAt"]})
+        snapshot = {
+            "name": "2026-07-22_12-00-00",
+            "comment": f"linxira-pre-change-{plan['id']}", "tag": "O",
+        }
+        progress = {
+            "schemaVersion": "org.linxira.components.system-worker-progress.v1",
+            "planId": plan["id"], "planDigest": plan["digest"],
+            "operationId": HYPERV_OPERATION, "snapshot": snapshot,
+        }
+        progress["digest"] = document_digest(progress)
+        store._write_new(store._path("worker-progress", plan["id"]), progress)
+        store._path("worker-results", plan["id"]).write_text("{", encoding="utf-8")
+
+        recovered = SystemTransactionStore(store.state_root, self.root, clock=self.clock)
+        state = recovered._load(state_path)
+        self.assertEqual(state["status"], "failed")
+        receipt = recovered.get_receipt(state["receiptId"], 1000)
+        self.assertEqual(receipt["snapshot"], snapshot)
+        self.assertIn("requires verification", receipt["error"])
+
     def test_installed_hardware_detector_integration(self):
         detector = Path("/usr/bin/linxira-chwd-detector")
         if not detector.is_file() or not os.access(detector, os.X_OK):
@@ -248,6 +315,14 @@ class SystemTransactionTests(unittest.TestCase):
             receipt = store.confirm_and_apply(plan["id"], plan["digest"], 1000)
         self.assertEqual(receipt["status"], "succeeded")
         self.assertIsInstance(receipt["verifiedState"]["profileIds"], list)
+
+    def test_worker_recovery_treats_oneshot_activating_as_running(self):
+        store = SystemTransactionStore(self.state / "active-worker", Path("/"), recover=False)
+        with mock.patch("linxira_components.system_transactions.subprocess.run") as runner:
+            runner.return_value = mock.Mock(returncode=0, stdout="activating\n")
+            self.assertTrue(store._worker_is_active("11111111-1111-4111-8111-111111111111"))
+            runner.return_value = mock.Mock(returncode=3, stdout="inactive\n")
+            self.assertFalse(store._worker_is_active("11111111-1111-4111-8111-111111111111"))
 
 
 if __name__ == "__main__":

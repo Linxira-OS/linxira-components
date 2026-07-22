@@ -38,8 +38,13 @@ The packaged system D-Bus service owns fixed system-tool transactions below
 parameters, binds short-lived plans to the caller UID, machine ID, boot ID, and
 operation registry digest, checks Polkit authorization, and writes immutable
 receipts. The initial registry exposes only pacman-lock diagnosis and live-chroot
-readiness inspection and strict hardware/driver-state diagnosis; none of these
-operations mutates the system. Package Center
+readiness inspection and strict hardware/driver-state diagnosis; none of those
+operations mutates the system. The fixed Hyper-V guest-tools operation binds
+hardware evidence, Timeshift Btrfs health, pacman database digests, and exact
+resolved artifacts into a root-owned plan. Its isolated worker must create and
+verify a pre-change snapshot, revalidate state, install only `hyperv`, and verify
+all artifacts before writing a receipt. Snapshot restore remains a separate
+authorization and requires reboot. Package Center
 continues to use its catalog-bound `pkexec linxira-components apply` boundary.
 
 ## CLI

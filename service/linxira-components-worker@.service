@@ -1,0 +1,22 @@
+[Unit]
+Description=Linxira fixed system transaction worker %i
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/flock --exclusive --wait 5 /run/lock/linxira-system-packages.lock /usr/bin/linxira-components-worker %i
+User=root
+Group=root
+StateDirectory=linxira/components/system-transactions
+StateDirectoryMode=0750
+UMask=0077
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=no
+NoNewPrivileges=no
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+TimeoutStartSec=infinity

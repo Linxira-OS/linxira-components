@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 
 from .errors import ComponentsError
 from .system_transactions import SystemTransactionStore
+from .worker import launch_system_worker
 
 
 BUS_NAME = "org.linxira.Components1"
@@ -27,11 +29,15 @@ def _imports():
     return dbus, DBusGMainLoop, GLib
 
 
-def create_service_class(dbus):
+def create_service_class(dbus, idle_add=None):
+    schedule = idle_add or (lambda callback, *args: callback(*args))
+
     class ComponentsService(dbus.service.Object):
         def __init__(self, bus, store=None):
             self.bus = bus
-            self.store = SystemTransactionStore() if store is None else store
+            self.store = SystemTransactionStore(mutation_executor=launch_system_worker) if store is None else store
+            self.apply_active = threading.Event()
+            self.plan_active = threading.Event()
             super().__init__(bus, OBJECT_PATH)
 
         def _uid(self, sender):
@@ -77,29 +83,85 @@ def create_service_class(dbus):
             in_signature="ss",
             out_signature="ss",
             sender_keyword="sender",
+            async_callbacks=("return_callback", "error_callback"),
         )
-        def CreateSystemPlan(self, operation_id, parameters_json, sender=None):
+        def CreateSystemPlan(
+            self, operation_id, parameters_json, sender=None,
+            return_callback=None, error_callback=None,
+        ):
+            if self.apply_active.is_set() or self.plan_active.is_set():
+                raise dbus.DBusException(
+                    "A system transaction is already running",
+                    name="org.linxira.Components1.Error.Busy",
+                )
             self._authorize(sender, "org.linxira.components.inspect")
             uid = self._uid(sender)
-            plan = self._call(
-                lambda: self.store.create_plan(str(operation_id), str(parameters_json), uid)
-            )
-            return plan["id"], json.dumps(plan, ensure_ascii=True, sort_keys=True)
+            self.plan_active.set()
+
+            def work():
+                try:
+                    plan = self.store.create_plan(str(operation_id), str(parameters_json), uid)
+                    schedule(
+                        return_callback, plan["id"],
+                        json.dumps(plan, ensure_ascii=True, sort_keys=True),
+                    )
+                except ComponentsError as exc:
+                    schedule(error_callback, dbus.DBusException(
+                        str(exc), name=f"org.linxira.Components1.Error.{exc.code}"
+                    ))
+                except Exception:
+                    schedule(error_callback, dbus.DBusException(
+                        "System plan creation failed",
+                        name="org.linxira.Components1.Error.Internal",
+                    ))
+                finally:
+                    self.plan_active.clear()
+
+            threading.Thread(target=work, daemon=True, name="linxira-system-plan").start()
 
         @dbus.service.method(
             INTERFACE,
             in_signature="ss",
             out_signature="ss",
             sender_keyword="sender",
+            async_callbacks=("return_callback", "error_callback"),
         )
-        def ConfirmAndApplySystemPlan(self, plan_id, plan_digest, sender=None):
+        def ConfirmAndApplySystemPlan(
+            self, plan_id, plan_digest, sender=None, return_callback=None, error_callback=None
+        ):
             uid = self._uid(sender)
             action = self._call(lambda: self.store.action_for_plan(str(plan_id), uid))
             self._authorize(sender, action)
-            receipt = self._call(
-                lambda: self.store.confirm_and_apply(str(plan_id), str(plan_digest), uid)
-            )
-            return receipt["id"], json.dumps(receipt, ensure_ascii=True, sort_keys=True)
+            if self.apply_active.is_set() or self.plan_active.is_set():
+                raise dbus.DBusException(
+                    "A system mutation is already running",
+                    name="org.linxira.Components1.Error.Busy",
+                )
+            self.apply_active.set()
+
+            def work():
+                try:
+                    receipt = self.store.confirm_and_apply(str(plan_id), str(plan_digest), uid)
+                    schedule(
+                        return_callback, receipt["id"],
+                        json.dumps(receipt, ensure_ascii=True, sort_keys=True),
+                    )
+                except ComponentsError as exc:
+                    error = dbus.DBusException(
+                        str(exc), name=f"org.linxira.Components1.Error.{exc.code}"
+                    )
+                    schedule(error_callback, error)
+                except Exception as exc:
+                    error = dbus.DBusException(
+                        "System transaction failed",
+                        name="org.linxira.Components1.Error.Internal",
+                    )
+                    error.__cause__ = exc
+                    schedule(error_callback, error)
+                finally:
+                    self.apply_active.clear()
+
+            threading.Thread(target=work, daemon=True, name="linxira-system-apply").start()
 
         @dbus.service.method(
             INTERFACE,
@@ -129,7 +191,7 @@ def main() -> int:
     DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
     name = dbus.service.BusName(BUS_NAME, bus=bus, do_not_queue=True)
-    service_class = create_service_class(dbus)
+    service_class = create_service_class(dbus, GLib.idle_add)
     service = service_class(bus)
     loop = GLib.MainLoop()
     try:

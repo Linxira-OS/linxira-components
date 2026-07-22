@@ -8,6 +8,7 @@ from pathlib import Path
 import platform
 import re
 import signal
+import shutil
 import stat
 import subprocess
 import threading
@@ -20,7 +21,7 @@ from .jsonio import document_digest
 
 PLAN_SCHEMA = "org.linxira.components.system-plan.v1"
 RECEIPT_SCHEMA = "org.linxira.components.system-receipt.v1"
-REGISTRY_VERSION = "2026.07.22.2"
+REGISTRY_VERSION = "2026.07.22.3"
 PACMAN_PROCESSES = frozenset({"pacman", "makepkg", "yay", "paru", "pikaur", "packagekitd"})
 OPERATIONS = {
     "org.linxira.recovery.pacman-lock-diagnose.v1": {
@@ -40,6 +41,12 @@ OPERATIONS = {
         "lockDomain": "hardware-diagnostics",
         "risk": "read-only",
         "rollback": "not-applicable",
+    },
+    "org.linxira.driver.vm-hyperv-guest.v1": {
+        "action": "org.linxira.components.driver",
+        "lockDomain": "system-packages",
+        "risk": "system-change-reboot-possible",
+        "rollback": "pre-change-timeshift-snapshot-separate-restore-authorization",
     },
 }
 REGISTRY_DIGEST = hashlib.sha256(
@@ -185,13 +192,16 @@ class SystemTransactionStore:
         *,
         runner: Runner = subprocess.run,
         clock: Callable[[], datetime] = _now,
+        mutation_executor: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        recover: bool = True,
     ) -> None:
         self.state_root = state_root
         self.system_root = system_root
         self.runner = runner
         self.clock = clock
+        self.mutation_executor = mutation_executor
         self._lock = threading.RLock()
-        for name in ("plans", "state", "receipts"):
+        for name in ("plans", "state", "receipts", "worker-results", "worker-progress"):
             directory = self.state_root / name
             directory.mkdir(parents=True, exist_ok=True, mode=0o750)
             if directory.is_symlink() or not directory.is_dir():
@@ -200,7 +210,38 @@ class SystemTransactionStore:
                 directory.chmod(0o750)
             except OSError as exc:
                 raise ValidationError(f"cannot secure system transaction directory: {directory}") from exc
-        self.recover_interrupted()
+        cache = self.state_root / "worker-cache"
+        cache.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if cache.is_symlink() or not cache.is_dir():
+            raise ValidationError(f"unsafe system transaction directory: {cache}")
+        cache.chmod(0o700)
+        if recover:
+            self.recover_interrupted()
+
+    def _run_fixed(self, command: list[str], timeout: int, limit: int):
+        environment = {"PATH": "/usr/bin:/usr/sbin", "LC_ALL": "C"}
+        try:
+            if self.runner is subprocess.run:
+                result = _bounded_process(command, limit=limit, timeout=timeout, env=environment)
+            else:
+                result = self.runner(
+                    command, check=False, capture_output=True, text=True, timeout=timeout,
+                    shell=False, env=environment,
+                )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValidationError(f"fixed system command failed: {command[0]}") from exc
+        stdout_value = result.stdout or b""
+        stderr_value = result.stderr or b""
+        stdout_bytes = stdout_value.encode() if isinstance(stdout_value, str) else stdout_value
+        stderr_bytes = stderr_value.encode() if isinstance(stderr_value, str) else stderr_value
+        if len(stdout_bytes) + len(stderr_bytes) > limit:
+            raise ValidationError(f"fixed system command output exceeds limit: {command[0]}")
+        try:
+            stdout = stdout_bytes.decode("utf-8", errors="strict")
+            stderr = stderr_bytes.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise ValidationError(f"fixed system command output is not UTF-8: {command[0]}") from exc
+        return subprocess.CompletedProcess(command, result.returncode, stdout, stderr)
 
     def _system_path(self, value: str) -> Path:
         return self.system_root / value.lstrip("/")
@@ -449,6 +490,12 @@ class SystemTransactionStore:
             return self._live_readiness_evidence()
         if operation_id == "org.linxira.hardware.driver-state-diagnose.v1":
             return self._hardware_driver_evidence()
+        if operation_id == "org.linxira.driver.vm-hyperv-guest.v1":
+            from .driver_worker import collect_hyperv_prestate
+            return collect_hyperv_prestate(
+                self.system_root, self._run_fixed, self._hardware_driver_evidence(),
+                self._pacman_lock_evidence(),
+            )
         raise ValidationError(f"unsupported system operation: {operation_id}")
 
     def _path(self, collection: str, identifier: str) -> Path:
@@ -463,7 +510,8 @@ class SystemTransactionStore:
         if path.exists() or path.is_symlink():
             raise ValidationError(f"system transaction document already exists: {path.name}")
         payload = json.dumps(document, ensure_ascii=True, indent=2, sort_keys=True) + "\n"
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        temporary = path.with_name(f".{path.name}.{uuid4().hex}.new")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8", closefd=False) as stream:
                 stream.write(payload)
@@ -471,6 +519,12 @@ class SystemTransactionStore:
                 os.fsync(stream.fileno())
         finally:
             os.close(descriptor)
+        try:
+            os.link(temporary, path)
+        except FileExistsError as exc:
+            raise ValidationError(f"system transaction document already exists: {path.name}") from exc
+        finally:
+            temporary.unlink(missing_ok=True)
         self._sync_directory(path.parent)
 
     def _replace(self, path: Path, document: dict[str, Any]) -> None:
@@ -526,6 +580,44 @@ class SystemTransactionStore:
                 continue
             if document.get("status") not in {"confirmed", "applying", "verifying"}:
                 continue
+            try:
+                plan = self._load(self._path("plans", str(document.get("id"))))
+            except ValidationError:
+                plan = None
+            if (
+                isinstance(plan, dict)
+                and plan.get("operationId") == "org.linxira.driver.vm-hyperv-guest.v1"
+                and document.get("status") in {"applying", "verifying"}
+                and (
+                    document.get("status") == "applying"
+                    or not isinstance(document.get("receiptId"), str)
+                    or not self._path("receipts", str(document.get("receiptId"))).exists()
+                )
+            ):
+                if self._worker_is_active(str(plan["id"])):
+                    continue
+                try:
+                    from .driver_worker import _failed_result, validate_result
+                    try:
+                        result = self._load(self._path("worker-results", str(plan["id"])))
+                    except ValidationError:
+                        progress = self._load(self._path("worker-progress", str(plan["id"])))
+                        if (
+                            progress.get("planId") != plan["id"]
+                            or progress.get("planDigest") != plan["digest"]
+                            or progress.get("digest") != document_digest(progress)
+                        ):
+                            raise ValidationError("invalid interrupted worker progress")
+                        result = _failed_result(
+                            plan, "worker interrupted after rollback snapshot; package state requires verification",
+                            progress.get("snapshot"), True,
+                        )
+                        result["digest"] = document_digest(result)
+                    validate_result(result, plan)
+                    self._finalize_mutation(plan, result)
+                    continue
+                except ValidationError:
+                    pass
             receipt_id = document.get("receiptId")
             if document.get("status") == "verifying" and isinstance(receipt_id, str):
                 try:
@@ -539,11 +631,11 @@ class SystemTransactionStore:
                         and receipt.get("planDigest") == plan.get("digest")
                         and receipt.get("operationId") == plan.get("operationId")
                         and receipt.get("creatorUid") == plan.get("creatorUid")
-                        and receipt.get("status") == "succeeded"
+                        and receipt.get("status") in {"succeeded", "failed"}
                         and isinstance(receipt.get("completedAt"), str)
                     ):
                         self._replace(path, {
-                            "id": document.get("id"), "status": "succeeded",
+                            "id": document.get("id"), "status": receipt.get("status"),
                             "updatedAt": receipt.get("completedAt"), "receiptId": receipt_id,
                         })
                         continue
@@ -554,6 +646,22 @@ class SystemTransactionStore:
                 "status": "interrupted",
                 "updatedAt": _timestamp(self.clock()),
             })
+
+    def _worker_is_active(self, plan_id: str) -> bool:
+        if self.system_root != Path("/"):
+            return False
+        try:
+            result = subprocess.run(
+                [
+                    "/usr/bin/systemctl", "show", "--property=ActiveState", "--value",
+                    f"linxira-components-worker@{plan_id}.service",
+                ],
+                check=False, capture_output=True, text=True, timeout=10, shell=False,
+                env={"PATH": "/usr/bin", "LC_ALL": "C"},
+            )
+            return result.returncode == 0 and result.stdout.strip() in {"activating", "active", "reloading"}
+        except (OSError, subprocess.TimeoutExpired):
+            return False
 
     def _enforce_plan_quota(self, creator_uid: int) -> None:
         total = 0
@@ -576,6 +684,18 @@ class SystemTransactionStore:
             ):
                 path.unlink()
                 self._path("state", str(plan["id"])).unlink()
+                for collection in ("worker-progress", "worker-results"):
+                    related = self._path(collection, str(plan["id"]))
+                    if related.exists() and not related.is_symlink():
+                        related.unlink()
+                receipt_id = state.get("receiptId")
+                if isinstance(receipt_id, str):
+                    receipt_path = self._path("receipts", receipt_id)
+                    if receipt_path.exists() and not receipt_path.is_symlink():
+                        receipt_path.unlink()
+                cache = self.state_root / "worker-cache" / str(plan["id"])
+                if cache.is_dir() and not cache.is_symlink():
+                    shutil.rmtree(cache)
                 self._sync_directory(path.parent)
                 self._sync_directory(self.state_root / "state")
                 continue
@@ -657,6 +777,36 @@ class SystemTransactionStore:
                     "id": plan_id, "status": "failed", "updatedAt": _timestamp(self.clock()),
                 })
                 raise
+            if plan["risk"] != "read-only":
+                if current != plan["preState"]:
+                    self._replace(state_path, {
+                        "id": plan_id, "status": "stale", "updatedAt": _timestamp(self.clock()),
+                    })
+                    raise ValidationError("system state changed after the driver plan was created")
+                if self.mutation_executor is None:
+                    self._replace(state_path, {
+                        "id": plan_id, "status": "failed", "updatedAt": _timestamp(self.clock()),
+                    })
+                    raise ValidationError("isolated system worker is unavailable")
+                try:
+                    result = self.mutation_executor(plan)
+                    from .driver_worker import validate_result
+                    result = validate_result(result, plan)
+                except Exception:
+                    self._replace(state_path, {
+                        "id": plan_id, "status": "failed", "updatedAt": _timestamp(self.clock()),
+                    })
+                    raise
+                completed_state = self._load(state_path)
+                if completed_state.get("status") in {"succeeded", "failed"}:
+                    receipt = self._load(self._path("receipts", str(completed_state.get("receiptId"))))
+                    if (
+                        receipt.get("planId") != plan_id or receipt.get("planDigest") != plan["digest"]
+                        or receipt.get("digest") != document_digest(receipt)
+                    ):
+                        raise ValidationError("isolated worker finalized an invalid receipt")
+                    return receipt
+                return self._finalize_mutation(plan, result)
             receipt_id = str(uuid4())
             self._replace(state_path, {
                 "id": plan_id, "status": "verifying", "updatedAt": _timestamp(self.clock()),
@@ -669,20 +819,88 @@ class SystemTransactionStore:
                 "planDigest": plan["digest"],
                 "operationId": plan["operationId"],
                 "creatorUid": caller_uid,
-                "status": "succeeded",
+                "status": result["status"] if plan["risk"] != "read-only" else "succeeded",
                 "completedAt": _timestamp(self.clock()),
                 "preState": plan["preState"],
-                "verifiedState": current,
-                "changed": False,
-                "rollback": "not-applicable",
+                "verifiedState": result["verifiedState"] if plan["risk"] != "read-only" else current,
+                "changed": result["changed"] if plan["risk"] != "read-only" else False,
+                "rollback": result["rollback"] if plan["risk"] != "read-only" else "not-applicable",
             }
+            if plan["risk"] != "read-only":
+                receipt["snapshot"] = result["snapshot"]
             receipt["digest"] = document_digest(receipt)
             self._write_new(self._path("receipts", receipt_id), receipt)
             self._replace(state_path, {
-                "id": plan_id, "status": "succeeded", "updatedAt": receipt["completedAt"],
+                "id": plan_id, "status": receipt["status"], "updatedAt": receipt["completedAt"],
                 "receiptId": receipt_id,
             })
             return receipt
+
+    def _finalize_mutation(self, plan: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+        receipt_id = str(uuid4())
+        receipt = {
+            "schemaVersion": RECEIPT_SCHEMA,
+            "id": receipt_id,
+            "planId": plan["id"],
+            "planDigest": plan["digest"],
+            "operationId": plan["operationId"],
+            "creatorUid": plan["creatorUid"],
+            "status": result["status"],
+            "completedAt": _timestamp(self.clock()),
+            "preState": plan["preState"],
+            "verifiedState": result["verifiedState"],
+            "changed": result["changed"],
+            "rollback": result["rollback"],
+            "snapshot": result["snapshot"],
+        }
+        if result["status"] == "failed":
+            receipt["error"] = result["error"]
+        receipt["digest"] = document_digest(receipt)
+        self._replace(self._path("state", plan["id"]), {
+            "id": plan["id"], "status": "verifying", "updatedAt": receipt["completedAt"],
+            "receiptId": receipt_id,
+        })
+        self._write_new(self._path("receipts", receipt_id), receipt)
+        self._replace(self._path("state", plan["id"]), {
+            "id": plan["id"], "status": receipt["status"], "updatedAt": receipt["completedAt"],
+            "receiptId": receipt_id,
+        })
+        return receipt
+
+    def execute_worker(self, plan_id: str) -> dict[str, Any]:
+        from .driver_worker import HYPERV_OPERATION, apply_hyperv
+        plan = self._load(self._path("plans", plan_id))
+        state = self._load(self._path("state", plan_id))
+        if (
+            plan.get("schemaVersion") != PLAN_SCHEMA or plan.get("digest") != document_digest(plan)
+            or plan.get("operationId") != HYPERV_OPERATION or state.get("status") != "applying"
+        ):
+            raise ValidationError("worker plan or state is invalid")
+        for key, value in self._binding().items():
+            if plan.get(key) != value:
+                raise ValidationError(f"worker plan is stale: {key} changed")
+        current = self._evidence(HYPERV_OPERATION)
+        if current != plan.get("preState"):
+            raise ValidationError("system state changed before isolated driver apply")
+        def checkpoint(snapshot):
+            progress = {
+                "schemaVersion": "org.linxira.components.system-worker-progress.v1",
+                "planId": plan["id"], "planDigest": plan["digest"],
+                "operationId": HYPERV_OPERATION, "snapshot": snapshot,
+            }
+            progress["digest"] = document_digest(progress)
+            self._write_new(self._path("worker-progress", plan["id"]), progress)
+
+        result = apply_hyperv(
+            plan, self._run_fixed, lambda: self._evidence(HYPERV_OPERATION),
+            self.state_root / "worker-cache", checkpoint,
+        )
+        result["digest"] = document_digest(result)
+        self._write_new(self._path("worker-results", plan_id), result)
+        from .driver_worker import validate_result
+        validate_result(result, plan)
+        self._finalize_mutation(plan, result)
+        return result
 
     def get_receipt(self, receipt_id: str, caller_uid: int) -> dict[str, Any]:
         receipt = self._load(self._path("receipts", receipt_id))
