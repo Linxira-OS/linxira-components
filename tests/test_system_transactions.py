@@ -21,6 +21,8 @@ LOCK_OPERATION = "org.linxira.recovery.pacman-lock-diagnose.v1"
 LIVE_OPERATION = "org.linxira.recovery.live-chroot-readiness.v1"
 HARDWARE_OPERATION = "org.linxira.hardware.driver-state-diagnose.v1"
 HYPERV_OPERATION = "org.linxira.driver.vm-hyperv-guest.v1"
+QEMU_OPERATION = "org.linxira.driver.vm-qemu-guest.v1"
+VMWARE_OPERATION = "org.linxira.driver.vm-vmware-guest.v1"
 
 
 class MutableClock:
@@ -214,6 +216,12 @@ class SystemTransactionTests(unittest.TestCase):
         self.assertTrue(receipt["changed"])
         self.assertEqual(receipt["snapshot"]["name"], "2026-07-22_12-00-00")
         executor.assert_called_once_with(plan)
+
+    def test_only_reviewed_guest_operations_have_driver_authorization(self):
+        self.assertEqual(self.store.operation_action(QEMU_OPERATION), "org.linxira.components.driver")
+        self.assertEqual(self.store.operation_action(VMWARE_OPERATION), "org.linxira.components.driver")
+        with self.assertRaisesRegex(ValidationError, "unsupported"):
+            self.store.operation_action("org.linxira.driver.vm-virtualbox-guest.v1")
 
     def test_missing_and_tampered_documents_fail_closed(self):
         with self.assertRaisesRegex(ValidationError, "does not exist"):

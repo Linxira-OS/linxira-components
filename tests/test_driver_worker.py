@@ -10,11 +10,16 @@ import tarfile
 import unittest
 
 from linxira_components.driver_worker import (
+    GUEST_SPECS,
     HYPERV_OPERATION,
+    QEMU_OPERATION,
+    VMWARE_OPERATION,
     apply_hyperv,
     collect_hyperv_prestate,
+    validate_result,
 )
 from linxira_components.errors import ValidationError
+from linxira_components.jsonio import document_digest
 
 
 class FixedResults:
@@ -85,10 +90,47 @@ class DriverWorkerTests(unittest.TestCase):
             {"lock": {"exists": False}, "packageProcesses": []},
         )
         self.assertTrue(state["snapshot"]["ready"])
-        self.assertEqual(state["package"]["target"], "hyperv")
+        self.assertEqual(state["package"]["targets"], ["hyperv"])
         self.assertEqual(state["package"]["artifacts"][0]["version"], "6.15-1")
         self.assertEqual(run.calls[0][0][0], "/usr/bin/findmnt")
         self.assertIn("%n\t%v\t%l", run.calls[2][0])
+
+    def test_guest_adapter_registry_keeps_platform_packages_and_units_fixed(self):
+        self.assertEqual(GUEST_SPECS[QEMU_OPERATION].packages, ("qemu-guest-agent", "spice-vdagent"))
+        self.assertEqual(dict(GUEST_SPECS[QEMU_OPERATION].services), {
+            "qemu-guest-agent.service": "static", "spice-vdagentd.socket": "static",
+        })
+        self.assertEqual(GUEST_SPECS[VMWARE_OPERATION].packages, ("open-vm-tools",))
+        self.assertEqual(dict(GUEST_SPECS[VMWARE_OPERATION].services), {
+            "vmtoolsd.service": "enabled", "vmware-vmblock-fuse.service": "enabled",
+        })
+        self.assertNotIn("org.linxira.driver.vm-virtualbox-guest.v1", GUEST_SPECS)
+
+    def test_qemu_and_vmware_results_are_operation_and_service_bound(self):
+        for operation_id in (QEMU_OPERATION, VMWARE_OPERATION):
+            spec = GUEST_SPECS[operation_id]
+            artifacts = [{"name": name, "version": "1.0-1"} for name in spec.packages]
+            plan = {
+                "id": "11111111-1111-4111-8111-111111111111", "digest": "plan-digest",
+                "operationId": operation_id, "preState": {"package": {"artifacts": artifacts}},
+            }
+            result = {
+                "schemaVersion": "org.linxira.components.system-worker-result.v1",
+                "planId": plan["id"], "planDigest": plan["digest"], "operationId": operation_id,
+                "status": "succeeded", "changed": True,
+                "snapshot": {
+                    "name": "2026-07-22_12-00-00",
+                    "comment": f"linxira-pre-change-{plan['id']}", "tag": "O",
+                },
+                "verifiedState": {"artifacts": artifacts, "services": dict(spec.services)},
+                "rollback": "timeshift-restore-requires-separate-authorization-and-reboot",
+            }
+            result["digest"] = document_digest(result)
+            self.assertEqual(validate_result(result, plan), result)
+            result["operationId"] = HYPERV_OPERATION
+            result["digest"] = document_digest(result)
+            with self.assertRaisesRegex(ValidationError, "invalid result"):
+                validate_result(result, plan)
 
     def test_apply_requires_verified_snapshot_before_fixed_pacman(self):
         calls = []

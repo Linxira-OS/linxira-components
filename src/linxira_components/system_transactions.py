@@ -21,7 +21,7 @@ from .jsonio import document_digest
 
 PLAN_SCHEMA = "org.linxira.components.system-plan.v1"
 RECEIPT_SCHEMA = "org.linxira.components.system-receipt.v1"
-REGISTRY_VERSION = "2026.07.22.3"
+REGISTRY_VERSION = "2026.07.22.4"
 PACMAN_PROCESSES = frozenset({"pacman", "makepkg", "yay", "paru", "pikaur", "packagekitd"})
 OPERATIONS = {
     "org.linxira.recovery.pacman-lock-diagnose.v1": {
@@ -43,6 +43,18 @@ OPERATIONS = {
         "rollback": "not-applicable",
     },
     "org.linxira.driver.vm-hyperv-guest.v1": {
+        "action": "org.linxira.components.driver",
+        "lockDomain": "system-packages",
+        "risk": "system-change-reboot-possible",
+        "rollback": "pre-change-timeshift-snapshot-separate-restore-authorization",
+    },
+    "org.linxira.driver.vm-qemu-guest.v1": {
+        "action": "org.linxira.components.driver",
+        "lockDomain": "system-packages",
+        "risk": "system-change-reboot-possible",
+        "rollback": "pre-change-timeshift-snapshot-separate-restore-authorization",
+    },
+    "org.linxira.driver.vm-vmware-guest.v1": {
         "action": "org.linxira.components.driver",
         "lockDomain": "system-packages",
         "risk": "system-change-reboot-possible",
@@ -490,11 +502,11 @@ class SystemTransactionStore:
             return self._live_readiness_evidence()
         if operation_id == "org.linxira.hardware.driver-state-diagnose.v1":
             return self._hardware_driver_evidence()
-        if operation_id == "org.linxira.driver.vm-hyperv-guest.v1":
-            from .driver_worker import collect_hyperv_prestate
-            return collect_hyperv_prestate(
+        from .driver_worker import GUEST_SPECS, collect_guest_prestate
+        if operation_id in GUEST_SPECS:
+            return collect_guest_prestate(
                 self.system_root, self._run_fixed, self._hardware_driver_evidence(),
-                self._pacman_lock_evidence(),
+                self._pacman_lock_evidence(), GUEST_SPECS[operation_id],
             )
         raise ValidationError(f"unsupported system operation: {operation_id}")
 
@@ -586,7 +598,11 @@ class SystemTransactionStore:
                 plan = None
             if (
                 isinstance(plan, dict)
-                and plan.get("operationId") == "org.linxira.driver.vm-hyperv-guest.v1"
+                and plan.get("operationId") in {
+                    "org.linxira.driver.vm-hyperv-guest.v1",
+                    "org.linxira.driver.vm-qemu-guest.v1",
+                    "org.linxira.driver.vm-vmware-guest.v1",
+                }
                 and document.get("status") in {"applying", "verifying"}
                 and (
                     document.get("status") == "applying"
@@ -603,7 +619,9 @@ class SystemTransactionStore:
                     except ValidationError:
                         progress = self._load(self._path("worker-progress", str(plan["id"])))
                         if (
-                            progress.get("planId") != plan["id"]
+                            progress.get("schemaVersion") != "org.linxira.components.system-worker-progress.v1"
+                            or progress.get("operationId") != plan["operationId"]
+                            or progress.get("planId") != plan["id"]
                             or progress.get("planDigest") != plan["digest"]
                             or progress.get("digest") != document_digest(progress)
                         ):
@@ -868,32 +886,33 @@ class SystemTransactionStore:
         return receipt
 
     def execute_worker(self, plan_id: str) -> dict[str, Any]:
-        from .driver_worker import HYPERV_OPERATION, apply_hyperv
+        from .driver_worker import GUEST_SPECS, apply_guest
         plan = self._load(self._path("plans", plan_id))
         state = self._load(self._path("state", plan_id))
+        spec = GUEST_SPECS.get(str(plan.get("operationId")))
         if (
             plan.get("schemaVersion") != PLAN_SCHEMA or plan.get("digest") != document_digest(plan)
-            or plan.get("operationId") != HYPERV_OPERATION or state.get("status") != "applying"
+            or spec is None or state.get("status") != "applying"
         ):
             raise ValidationError("worker plan or state is invalid")
         for key, value in self._binding().items():
             if plan.get(key) != value:
                 raise ValidationError(f"worker plan is stale: {key} changed")
-        current = self._evidence(HYPERV_OPERATION)
+        current = self._evidence(spec.operation_id)
         if current != plan.get("preState"):
             raise ValidationError("system state changed before isolated driver apply")
         def checkpoint(snapshot):
             progress = {
                 "schemaVersion": "org.linxira.components.system-worker-progress.v1",
                 "planId": plan["id"], "planDigest": plan["digest"],
-                "operationId": HYPERV_OPERATION, "snapshot": snapshot,
+                "operationId": spec.operation_id, "snapshot": snapshot,
             }
             progress["digest"] = document_digest(progress)
             self._write_new(self._path("worker-progress", plan["id"]), progress)
 
-        result = apply_hyperv(
-            plan, self._run_fixed, lambda: self._evidence(HYPERV_OPERATION),
-            self.state_root / "worker-cache", checkpoint,
+        result = apply_guest(
+            plan, self._run_fixed, lambda: self._evidence(spec.operation_id),
+            self.state_root / "worker-cache", spec, checkpoint,
         )
         result["digest"] = document_digest(result)
         self._write_new(self._path("worker-results", plan_id), result)

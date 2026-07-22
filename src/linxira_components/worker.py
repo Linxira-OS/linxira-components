@@ -40,7 +40,10 @@ def launch_system_worker(plan: dict) -> dict:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValidationError("isolated system worker failed before creating a rollback snapshot") from exc
         if (
-            not isinstance(progress, dict) or progress.get("planId") != identifier
+            not isinstance(progress, dict)
+            or progress.get("schemaVersion") != "org.linxira.components.system-worker-progress.v1"
+            or progress.get("operationId") != plan.get("operationId")
+            or progress.get("planId") != identifier
             or progress.get("planDigest") != plan.get("digest")
             or progress.get("digest") != document_digest(progress)
             or not isinstance(progress.get("snapshot"), dict)

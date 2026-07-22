@@ -10,12 +10,15 @@ import stat
 import subprocess
 import tarfile
 from typing import Any, Callable
+from dataclasses import dataclass
 
 from .errors import ValidationError
 from .jsonio import document_digest
 
 
 HYPERV_OPERATION = "org.linxira.driver.vm-hyperv-guest.v1"
+QEMU_OPERATION = "org.linxira.driver.vm-qemu-guest.v1"
+VMWARE_OPERATION = "org.linxira.driver.vm-vmware-guest.v1"
 RESULT_SCHEMA = "org.linxira.components.system-worker-result.v1"
 PACKAGE_NAME_RE = re.compile(r"^[a-z0-9@._+:-]+$")
 SNAPSHOT_RE = re.compile(
@@ -23,7 +26,30 @@ SNAPSHOT_RE = re.compile(
     r"\s+(?P<tags>[OBHDWM]+)\s+(?P<comment>.*)$"
 )
 RunFixed = Callable[[list[str], int, int], subprocess.CompletedProcess]
-HYPERV_SERVICES = ("hv_kvp_daemon.service", "hv_vss_daemon.service")
+
+
+@dataclass(frozen=True)
+class GuestSpec:
+    operation_id: str
+    fact_id: str
+    packages: tuple[str, ...]
+    services: tuple[tuple[str, str], ...]
+
+
+GUEST_SPECS = {
+    HYPERV_OPERATION: GuestSpec(
+        HYPERV_OPERATION, "vm.hyperv", ("hyperv",),
+        (("hv_kvp_daemon.service", "enabled"), ("hv_vss_daemon.service", "enabled")),
+    ),
+    QEMU_OPERATION: GuestSpec(
+        QEMU_OPERATION, "vm.qemu", ("qemu-guest-agent", "spice-vdagent"),
+        (("qemu-guest-agent.service", "static"), ("spice-vdagentd.socket", "static")),
+    ),
+    VMWARE_OPERATION: GuestSpec(
+        VMWARE_OPERATION, "vm.vmware", ("open-vm-tools",),
+        (("vmtoolsd.service", "enabled"), ("vmware-vmblock-fuse.service", "enabled")),
+    ),
+}
 
 
 def _strict_object(path: Path, limit: int = 128 * 1024) -> dict[str, Any]:
@@ -166,9 +192,9 @@ def _sync_metadata(root: Path) -> dict[str, dict[str, str]]:
     return packages
 
 
-def _package_artifacts(root: Path, run: RunFixed) -> list[dict[str, str]]:
+def _package_artifacts(root: Path, run: RunFixed, targets: tuple[str, ...]) -> list[dict[str, str]]:
     result = run([
-        "/usr/bin/pacman", "--sync", "--print", "--print-format", "%n\t%v\t%l", "--", "hyperv",
+        "/usr/bin/pacman", "--sync", "--print", "--print-format", "%n\t%v\t%l", "--", *targets,
     ], 30, 512 * 1024)
     if result.returncode != 0:
         raise ValidationError("pacman cannot resolve the fixed Hyper-V package cohort")
@@ -184,8 +210,8 @@ def _package_artifacts(root: Path, run: RunFixed) -> list[dict[str, str]]:
     if not artifacts or len({item["name"] for item in artifacts}) != len(artifacts):
         raise ValidationError("pacman package resolution is empty or duplicated")
     artifacts.sort(key=lambda item: (item["name"], item["version"]))
-    if not any(item["name"] == "hyperv" for item in artifacts):
-        raise ValidationError("pacman resolution omitted the fixed Hyper-V package")
+    if not set(targets).issubset({item["name"] for item in artifacts}):
+        raise ValidationError("pacman resolution omitted a fixed guest package")
     metadata = _sync_metadata(root)
     for artifact in artifacts:
         record = metadata.get(artifact["name"])
@@ -199,13 +225,13 @@ def _package_artifacts(root: Path, run: RunFixed) -> list[dict[str, str]]:
     return artifacts
 
 
-def _installed_version(run: RunFixed) -> str | None:
-    result = run(["/usr/bin/pacman", "--query", "--", "hyperv"], 10, 64 * 1024)
+def _installed_version(run: RunFixed, package: str) -> str | None:
+    result = run(["/usr/bin/pacman", "--query", "--", package], 10, 64 * 1024)
     if result.returncode != 0:
         return None
     fields = result.stdout.strip().split()
-    if len(fields) != 2 or fields[0] != "hyperv":
-        raise ValidationError("pacman returned malformed installed Hyper-V state")
+    if len(fields) != 2 or fields[0] != package:
+        raise ValidationError("pacman returned malformed installed guest state")
     return fields[1]
 
 
@@ -217,11 +243,11 @@ def _service_state(run: RunFixed, service: str) -> str:
     return "unavailable"
 
 
-def collect_hyperv_prestate(
-    root: Path, run: RunFixed, hardware: dict[str, Any], package_lock: dict[str, Any]
+def collect_guest_prestate(
+    root: Path, run: RunFixed, hardware: dict[str, Any], package_lock: dict[str, Any], spec: GuestSpec
 ) -> dict[str, Any]:
-    if "vm.hyperv" not in hardware.get("profileIds", []):
-        raise ValidationError("Hyper-V driver apply is not applicable to detected hardware")
+    if spec.fact_id not in hardware.get("profileIds", []):
+        raise ValidationError("guest driver apply is not applicable to detected hardware")
     if package_lock.get("lock", {}).get("exists") is not False or package_lock.get("packageProcesses"):
         raise ValidationError("another package transaction is active")
     config = _strict_object(root / "etc/timeshift/timeshift.json")
@@ -243,17 +269,26 @@ def collect_hyperv_prestate(
         "hardware": hardware,
         "snapshot": {"ready": True, "mode": "btrfs", "root": root_mount},
         "package": {
-            "target": "hyperv", "installedVersion": _installed_version(run),
-            "artifacts": _package_artifacts(root, run),
+            "targets": list(spec.packages),
+            "installedVersions": {package: _installed_version(run, package) for package in spec.packages},
+            "artifacts": _package_artifacts(root, run, spec.packages),
             "syncDatabaseSha256": _sync_database_digest(root),
         },
         "packageLock": package_lock,
-        "services": {service: _service_state(run, service) for service in HYPERV_SERVICES},
+        "services": {service: _service_state(run, service) for service, _state in spec.services},
     }
-    expected = next(item["version"] for item in state["package"]["artifacts"] if item["name"] == "hyperv")
-    if state["package"]["installedVersion"] == expected:
-        raise ValidationError("the fixed Hyper-V guest package is already at the planned version")
+    expected = {item["name"]: item["version"] for item in state["package"]["artifacts"]}
+    package_current = all(state["package"]["installedVersions"][name] == expected[name] for name in spec.packages)
+    services_current = all(state["services"][service] == desired for service, desired in spec.services)
+    if package_current and services_current:
+        raise ValidationError("the fixed guest integration is already at the planned state")
     return state
+
+
+def collect_hyperv_prestate(
+    root: Path, run: RunFixed, hardware: dict[str, Any], package_lock: dict[str, Any]
+) -> dict[str, Any]:
+    return collect_guest_prestate(root, run, hardware, package_lock, GUEST_SPECS[HYPERV_OPERATION])
 
 
 def _snapshots(text: str) -> dict[str, dict[str, str]]:
@@ -268,7 +303,7 @@ def _snapshots(text: str) -> dict[str, dict[str, str]]:
 def _failed_result(plan: dict[str, Any], error: str, snapshot: dict[str, str] | None, changed: bool):
     return {
         "schemaVersion": RESULT_SCHEMA,
-        "planId": plan["id"], "planDigest": plan["digest"], "operationId": HYPERV_OPERATION,
+        "planId": plan["id"], "planDigest": plan["digest"], "operationId": plan["operationId"],
         "status": "failed", "changed": changed, "snapshot": snapshot,
         "verifiedState": None, "error": error[:240],
         "rollback": (
@@ -308,8 +343,9 @@ def _alpm_commit(package_paths: list[str], before_commit: Callable[[], None]) ->
         raise ValidationError("libalpm Hyper-V package transaction failed") from exc
 
 
-def apply_hyperv(
+def apply_guest(
     plan: dict[str, Any], run: RunFixed, revalidate: Callable[[], dict[str, Any]], cache_root: Path,
+    spec: GuestSpec,
     checkpoint: Callable[[dict[str, str]], None] = lambda snapshot: None,
     commit_packages: Callable[[list[str], Callable[[], None]], None] = _alpm_commit,
 ) -> dict[str, Any]:
@@ -322,7 +358,7 @@ def apply_hyperv(
         download = run([
             "/usr/bin/pacman", "--sync", "--downloadonly", "--disable-sandbox", "--noconfirm",
             "--cachedir", str(cache),
-            "--", "hyperv",
+            "--", *spec.packages,
         ], 900, 1024 * 1024)
         if download.returncode != 0:
             raise ValidationError("fixed Hyper-V package download failed")
@@ -383,12 +419,14 @@ def apply_hyperv(
             install_started = True
 
         commit_packages(package_paths, create_snapshot_with_alpm_lock)
-        enable = run(["/usr/bin/systemctl", "enable", *HYPERV_SERVICES], 30, 128 * 1024)
-        if enable.returncode != 0:
-            raise ValidationError("Hyper-V integration services could not be enabled")
-        services = {service: _service_state(run, service) for service in HYPERV_SERVICES}
-        if any(state != "enabled" for state in services.values()):
-            raise ValidationError("Hyper-V integration service enablement failed verification")
+        enable_services = [service for service, state in spec.services if state == "enabled"]
+        if enable_services:
+            enable = run(["/usr/bin/systemctl", "enable", *enable_services], 30, 128 * 1024)
+            if enable.returncode != 0:
+                raise ValidationError("guest integration services could not be enabled")
+        services = {service: _service_state(run, service) for service, _state in spec.services}
+        if any(services[service] != desired for service, desired in spec.services):
+            raise ValidationError("guest integration service state failed verification")
         verified = []
         for artifact in plan["preState"]["package"]["artifacts"]:
             verify = run(["/usr/bin/pacman", "--query", "--", artifact["name"]], 10, 64 * 1024)
@@ -398,7 +436,7 @@ def apply_hyperv(
             verified.append({"name": artifact["name"], "version": artifact["version"]})
         return {
             "schemaVersion": RESULT_SCHEMA,
-            "planId": plan["id"], "planDigest": plan["digest"], "operationId": HYPERV_OPERATION,
+            "planId": plan["id"], "planDigest": plan["digest"], "operationId": spec.operation_id,
             "status": "succeeded", "changed": True, "snapshot": snapshot,
             "verifiedState": {"artifacts": verified, "services": services},
             "rollback": "timeshift-restore-requires-separate-authorization-and-reboot",
@@ -407,11 +445,25 @@ def apply_hyperv(
         return _failed_result(plan, str(exc), snapshot, install_started)
 
 
+def apply_hyperv(
+    plan: dict[str, Any], run: RunFixed, revalidate: Callable[[], dict[str, Any]], cache_root: Path,
+    checkpoint: Callable[[dict[str, str]], None] = lambda snapshot: None,
+    commit_packages: Callable[[list[str], Callable[[], None]], None] = _alpm_commit,
+) -> dict[str, Any]:
+    return apply_guest(
+        plan, run, revalidate, cache_root, GUEST_SPECS[HYPERV_OPERATION], checkpoint, commit_packages
+    )
+
+
 def validate_result(result: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+    try:
+        spec = GUEST_SPECS[plan["operationId"]]
+    except KeyError as exc:
+        raise ValidationError("system worker plan has no fixed guest adapter") from exc
     if (
         result.get("schemaVersion") != RESULT_SCHEMA or result.get("planId") != plan.get("id")
         or result.get("planDigest") != plan.get("digest")
-        or result.get("operationId") != HYPERV_OPERATION or result.get("status") not in {"succeeded", "failed"}
+        or result.get("operationId") != spec.operation_id or result.get("status") not in {"succeeded", "failed"}
         or not isinstance(result.get("changed"), bool)
         or result.get("digest") != document_digest(result)
     ):
@@ -430,7 +482,7 @@ def validate_result(result: dict[str, Any], plan: dict[str, Any]) -> dict[str, A
             {"name": item["name"], "version": item["version"]}
             for item in plan["preState"]["package"]["artifacts"]
         ],
-        "services": {service: "enabled" for service in HYPERV_SERVICES},
+        "services": dict(spec.services),
     }
     if result["status"] == "succeeded" and (
         result["changed"] is not True or result.get("verifiedState") != expected_verified
