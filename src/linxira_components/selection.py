@@ -185,6 +185,8 @@ def validate_selection(document: Any, catalog: CatalogV3) -> dict[str, Any]:
 def leaf_status(leaf: Leaf) -> tuple[str, str | None]:
     if not leaf.available:
         return "pending", leaf.unavailable_reason or "leaf is unavailable"
+    if leaf.kind == "desktop":
+        return "pending", "desktop environments are installed only by the installer"
     if leaf.kind == "operation":
         return "pending", "operation leaves require an explicit non-command action implementation"
     if leaf.provider in {"aur", "conda"}:

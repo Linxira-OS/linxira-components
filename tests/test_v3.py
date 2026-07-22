@@ -18,8 +18,9 @@ sys.path.insert(0, str(ROOT / "src"))
 from linxira_components.backend import DEFAULT_CATALOG_PATH, apply_transaction  # noqa: E402
 from linxira_components.catalog import load_catalog  # noqa: E402
 from linxira_components.cli import main  # noqa: E402
-from linxira_components.errors import CatalogDriftError, ValidationError  # noqa: E402
+from linxira_components.errors import CatalogDriftError, CatalogError, ValidationError  # noqa: E402
 from linxira_components.models import create_confirmation, create_request_plan  # noqa: E402
+from linxira_components.selection import expand_selection  # noqa: E402
 
 
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
@@ -92,6 +93,72 @@ class V3Fixture(unittest.TestCase):
         self.catalog_path = self.directory / "catalog-v3.json"
         self.write_catalog(catalog_document())
         self.catalog = load_catalog(self.catalog_path, "x86_64")
+
+    def test_loads_desktop_leaf_referenced_by_desktop_bundle(self) -> None:
+        document = catalog_document()
+        document["desktops"] = [{
+            "id": "desktop-plasma",
+            "kind": "desktop",
+            "provider": "pacman",
+            "source": "arch",
+            "artifact": {"type": "package-group", "ids": ["plasma-meta"]},
+            "availability": True,
+        }]
+        document["bundles"].append({
+            "id": "desktop-environments",
+            "surface": "desktops",
+            "selection": "exclusive",
+            "children": {"required": ["desktop-plasma"], "recommended": [], "optional": []},
+        })
+        self.write_catalog(document)
+        catalog = load_catalog(self.catalog_path, "x86_64")
+
+        self.assertEqual(catalog.leaves["desktop-plasma"].kind, "desktop")
+        self.assertEqual(catalog.descendant_leaf_ids("desktop-environments"), frozenset({"desktop-plasma"}))
+        selection = {
+            "schemaVersion": "org.linxira.component-selection.v1",
+            "catalogSha256": catalog.sha256,
+            "catalogRelease": catalog.release,
+            "selectedLeafIds": ["desktop-plasma"],
+            "selectedBundleIds": ["desktop-environments"],
+            "leaves": [{
+                "id": "desktop-plasma",
+                "requestedBy": ["desktop-environments/desktop-plasma"],
+                "provenance": ["required"],
+            }],
+            "userOverrides": [],
+            "constraintResults": [{
+                "bundleId": "desktop-environments",
+                "policy": "exclusive",
+                "selectedCount": 1,
+                "maxSelected": 1,
+                "valid": True,
+            }, {
+                "bundleId": "python-stack",
+                "policy": "preset",
+                "selectedCount": 0,
+                "maxSelected": None,
+                "valid": True,
+            }, {
+                "bundleId": "workstation",
+                "policy": "preset",
+                "selectedCount": 0,
+                "maxSelected": None,
+                "valid": True,
+            }],
+            "providerRequirements": ["pacman"],
+            "sourceRequirements": ["arch"],
+        }
+        plan = expand_selection(selection, catalog)
+        self.assertEqual(plan["directPackageTargets"], [])
+        self.assertEqual(plan["pendingItems"], ["desktop-plasma"])
+
+    def test_rejects_kind_that_does_not_match_leaf_collection(self) -> None:
+        document = catalog_document()
+        document["components"][0]["kind"] = "application"
+        self.write_catalog(document)
+        with self.assertRaisesRegex(CatalogError, r"invalid components\[0\]\.kind"):
+            load_catalog(self.catalog_path, "x86_64")
 
     def write_catalog(self, document: dict) -> None:
         self.catalog_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")

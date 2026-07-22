@@ -14,7 +14,7 @@ PACKAGE_RE = re.compile(r"^[a-z0-9@._+-]+$")
 ARTIFACT_RE = re.compile(r"^[A-Za-z0-9@._+:/-]+$")
 ROLES = ("required", "recommended", "optional")
 POLICIES = {"multi", "exclusive", "bounded", "preset"}
-LEAF_KINDS = {"application", "component", "operation"}
+LEAF_KINDS = {"application", "component", "desktop", "operation"}
 
 
 @dataclass(frozen=True)
@@ -198,28 +198,32 @@ def load_catalog_v3(path: str | Path, architecture: str) -> CatalogV3:
 
     raw_components = document.get("components", [])
     raw_applications = document.get("applications", [])
+    raw_desktops = document.get("desktops", [])
     raw_operations = document.get("operations", [])
     raw_bundles = document.get("bundles", [])
-    if not isinstance(raw_components, list) or not isinstance(raw_applications, list) or not isinstance(raw_operations, list):
-        raise CatalogError("catalog components, applications, and operations must be arrays")
+    if not all(isinstance(collection, list) for collection in (
+        raw_components, raw_applications, raw_desktops, raw_operations
+    )):
+        raise CatalogError("catalog components, applications, desktops, and operations must be arrays")
     if not isinstance(raw_bundles, list):
         raise CatalogError("catalog bundles must be an array")
 
     leaves: dict[str, Leaf] = {}
-    for collection, default_kind in (
-        (raw_components, "component"),
-        (raw_applications, "application"),
-        (raw_operations, "operation"),
+    for collection_name, collection, default_kind in (
+        ("components", raw_components, "component"),
+        ("applications", raw_applications, "application"),
+        ("desktops", raw_desktops, "desktop"),
+        ("operations", raw_operations, "operation"),
     ):
         for index, item in enumerate(collection):
-            context = f"{default_kind}s[{index}]"
+            context = f"{collection_name}[{index}]"
             if not isinstance(item, dict):
                 raise CatalogError(f"{context} must be an object")
             leaf_id = _identifier(item.get("id"), f"{context}.id")
             if leaf_id in leaves:
                 raise CatalogError(f"duplicate stable ID: {leaf_id}")
             kind = item.get("kind", default_kind)
-            if kind not in LEAF_KINDS:
+            if kind != default_kind:
                 raise CatalogError(f"invalid {context}.kind")
             provider = _identifier(item.get("provider", "unspecified"), f"{context}.provider")
             source = _identifier(item.get("source", "unspecified"), f"{context}.source")
