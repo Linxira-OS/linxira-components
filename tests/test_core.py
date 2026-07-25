@@ -443,7 +443,7 @@ class SafetyTests(CatalogFixture):
     def test_apply_records_failed_receipt_when_pacman_fails(self) -> None:
         _, confirmation = self.confirmed()
         runner = mock.Mock(return_value=subprocess.CompletedProcess([], 1, "", "package error"))
-        with self.assertRaisesRegex(Exception, "exit code 1"):
+        with self.assertRaisesRegex(Exception, "(?s)exit code 1.*package error.*Receipt:"):
             apply_transaction(
                 confirmation,
                 receipt_dir=self.directory / "receipts",
@@ -452,7 +452,9 @@ class SafetyTests(CatalogFixture):
                 runner=runner,
             )
         persisted = list((self.directory / "receipts").glob("*.json"))
-        self.assertEqual(json.loads(persisted[0].read_text(encoding="utf-8"))["status"], "failed")
+        document = json.loads(persisted[0].read_text(encoding="utf-8"))
+        self.assertEqual(document["status"], "failed")
+        self.assertIn("package error", document["message"])
 
     def test_output_is_confined_to_plain_filename(self) -> None:
         with self.assertRaises(UnsafePathError):

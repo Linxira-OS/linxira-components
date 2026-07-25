@@ -38,6 +38,18 @@ def _persist(receipt: Receipt, receipt_dir: Path) -> Path:
     return path
 
 
+def _process_output_summary(result: subprocess.CompletedProcess[str], *, limit: int = 2000) -> str:
+    parts = []
+    for label, value in (("stderr", result.stderr), ("stdout", result.stdout)):
+        text = (value or "").strip()
+        if text:
+            parts.append(f"{label}:\n{text}")
+    if not parts:
+        return "pacman produced no output"
+    summary = "\n\n".join(parts)
+    return summary if len(summary) <= limit else summary[-limit:]
+
+
 def apply_transaction(
     confirmation: Any,
     *,
@@ -139,10 +151,13 @@ def apply_transaction(
         raise TransactionError(str(exc)) from exc
 
     if result.returncode != 0:
-        output = (result.stderr or result.stdout or "pacman failed").strip()
+        output = _process_output_summary(result)
         receipt.transition("failed", message=output[-1000:])
-        _persist(receipt, receipt_dir_path)
-        raise TransactionError(f"pacman transaction failed with exit code {result.returncode}")
+        path = _persist(receipt, receipt_dir_path)
+        raise TransactionError(
+            f"pacman transaction failed with exit code {result.returncode}\n"
+            f"{output}\nReceipt: {path}"
+        )
 
     receipt.transition("succeeded", message="Arch package transaction completed")
     _persist(receipt, receipt_dir_path)
