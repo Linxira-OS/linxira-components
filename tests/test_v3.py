@@ -180,6 +180,33 @@ class V3Fixture(unittest.TestCase):
         self.assertEqual(selection["providerRequirements"], ["pacman"])
         self.assertNotIn("aur-tool", selection["selectedLeafIds"])
 
+    def test_pip_provider_is_planned_as_pending(self) -> None:
+        document = catalog_document()
+        document["components"].append(
+            {
+                "id": "pip-tool",
+                "kind": "component",
+                "name": {"en": "pip-tool"},
+                "provider": "pip",
+                "source": "pypi",
+                "availability": True,
+                "artifact": {"type": "package", "ids": ["httpie"]},
+            }
+        )
+        document["bundles"].append({
+            "id": "pip-workflow",
+            "selection": "preset",
+            "children": {"required": ["pip-tool"], "recommended": [], "optional": []},
+        })
+        self.write_catalog(document)
+        catalog = load_catalog(self.catalog_path, "x86_64")
+        selection = create_bundle_selection(catalog, "pip-workflow")
+        plan = create_request_plan(catalog, [], "x86_64", selection=selection, clock=lambda: NOW)
+
+        self.assertEqual(plan["directPackageTargets"], [])
+        self.assertEqual(plan["pendingItems"], ["pip-tool"])
+        self.assertEqual(plan["unsupportedItems"], [])
+
     def test_cli_plans_fixed_bundle_without_caller_package_ids(self) -> None:
         document = catalog_document()
         document["bundles"].append({

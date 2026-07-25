@@ -252,7 +252,7 @@ def leaf_status(leaf: Leaf) -> tuple[str, str | None]:
         return "pending", "desktop environments are installed only by the installer"
     if leaf.kind == "operation":
         return "pending", "operation leaves require an explicit non-command action implementation"
-    if leaf.provider in {"aur", "conda"}:
+    if leaf.provider in {"aur", "conda", "pip"}:
         return "pending", f"{leaf.provider} provider is not implemented"
     if leaf.provider != "pacman":
         return "unsupported", f"provider {leaf.provider} is not supported"
