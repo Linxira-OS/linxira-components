@@ -222,10 +222,11 @@ class V3Fixture(unittest.TestCase):
         self.write_catalog(document)
         output = self.directory / "bundle-plan"
         output.mkdir()
-        self.assertEqual(main([
-            "plan", "--catalog", str(self.catalog_path), "--bundle", "gaming-setup",
-            "--output-dir", str(output),
-        ]), 0)
+        with mock.patch("linxira_components.cli.query_satisfied_package_targets", return_value=None):
+            self.assertEqual(main([
+                "plan", "--catalog", str(self.catalog_path), "--bundle", "gaming-setup",
+                "--output-dir", str(output),
+            ]), 0)
         plan = json.loads((output / "request-plan.json").read_text(encoding="utf-8"))
         self.assertEqual(plan["directPackageTargets"], ["python"])
 
@@ -453,7 +454,10 @@ class CatalogV3Tests(V3Fixture):
         selection_path.write_text(json.dumps(self.selection()), encoding="utf-8")
         output_dir = self.directory / "out"
         output_dir.mkdir()
-        with redirect_stdout(mock.MagicMock()):
+        with (
+            mock.patch("linxira_components.cli.query_satisfied_package_targets", return_value=None),
+            redirect_stdout(mock.MagicMock()),
+        ):
             result = main([
                 "plan", "--catalog", str(self.catalog_path), "--selection", str(selection_path),
                 "--output-dir", str(output_dir),
