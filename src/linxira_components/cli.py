@@ -11,6 +11,7 @@ from .catalog import load_catalog
 from .catalog_v3 import CatalogV3
 from .errors import ComponentsError, ValidationError
 from .jsonio import atomic_write_json, load_strict
+from .inventory import collect_inventory, query_installed_packages, query_satisfied_package_targets
 from .models import create_confirmation, create_request_plan
 from .selection import create_bundle_selection
 
@@ -24,6 +25,10 @@ def _parser() -> argparse.ArgumentParser:
     list_parser.add_argument("--catalog", type=Path, required=True)
     list_parser.add_argument("--arch", default="x86_64")
     list_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    inventory_parser = subcommands.add_parser("inventory", help="report catalog installed state")
+    inventory_parser.add_argument("--catalog", type=Path, required=True)
+    inventory_parser.add_argument("--arch", default="x86_64")
 
     plan_parser = subcommands.add_parser("plan", help="create a canonical request plan")
     plan_parser.add_argument("--catalog", type=Path, required=True)
@@ -74,6 +79,10 @@ def _run(args: argparse.Namespace) -> int:
                 print(f"{profile.id}\t{profile.names['en']}")
         return 0
 
+    if args.command == "inventory":
+        _print_json(collect_inventory(load_catalog(args.catalog, args.arch)))
+        return 0
+
     if args.command == "plan":
         catalog = load_catalog(args.catalog, args.arch)
         if args.bundle is not None and args.selection is not None:
@@ -85,6 +94,11 @@ def _run(args: argparse.Namespace) -> int:
             if args.bundle is not None
             else load_strict(args.selection) if args.selection is not None else None
         )
+        installed = (
+            query_satisfied_package_targets(catalog, required=False)
+            if isinstance(catalog, CatalogV3)
+            else query_installed_packages(required=False)
+        )
         plan = create_request_plan(
             catalog,
             args.profiles,
@@ -92,6 +106,7 @@ def _run(args: argparse.Namespace) -> int:
             application_ids=args.applications,
             selection=selection,
             license_acceptances=args.license_acceptances,
+            installed_package_targets=installed,
         )
         path = atomic_write_json(args.output_dir, args.output, plan)
         _print_json({"path": str(path), "digest": plan["digest"]})
@@ -100,7 +115,12 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "confirm":
         catalog = load_catalog(args.catalog, args.arch)
         plan = load_strict(args.plan)
-        confirmation = create_confirmation(plan, catalog)
+        installed = (
+            query_satisfied_package_targets(catalog, required=False)
+            if isinstance(catalog, CatalogV3)
+            else query_installed_packages(required=False)
+        )
+        confirmation = create_confirmation(plan, catalog, installed_package_targets=installed)
         path = atomic_write_json(args.output_dir, args.output, confirmation)
         _print_json({"path": str(path), "digest": confirmation["digest"]})
         return 0

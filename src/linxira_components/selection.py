@@ -121,6 +121,46 @@ def required_license_acceptances(catalog: CatalogV3, leaf_ids: list[str] | tuple
     )
 
 
+def _expand_required_leaf_ids(selected_ids: list[str], catalog: CatalogV3) -> list[str]:
+    ordered: list[str] = []
+    expanded: set[str] = set()
+    visiting: list[str] = []
+
+    def visit_bundle(bundle_id: str) -> None:
+        if bundle_id in visiting:
+            cycle = " -> ".join([*visiting[visiting.index(bundle_id):], bundle_id])
+            raise ValidationError(f"required bundle cycle detected: {cycle}")
+        visiting.append(bundle_id)
+        for child in catalog.bundles[bundle_id].children:
+            if child.role != "required":
+                continue
+            if child.id in catalog.leaves:
+                visit(child.id)
+            else:
+                visit_bundle(child.id)
+        visiting.pop()
+
+    def visit(leaf_id: str) -> None:
+        if leaf_id in expanded:
+            return
+        if leaf_id in visiting:
+            cycle = " -> ".join([*visiting[visiting.index(leaf_id):], leaf_id])
+            raise ValidationError(f"required dependency cycle detected: {cycle}")
+        visiting.append(leaf_id)
+        for dependency_id in catalog.leaves[leaf_id].requires:
+            if dependency_id in catalog.leaves:
+                visit(dependency_id)
+            else:
+                visit_bundle(dependency_id)
+        visiting.pop()
+        expanded.add(leaf_id)
+        ordered.append(leaf_id)
+
+    for leaf_id in selected_ids:
+        visit(leaf_id)
+    return sorted(ordered)
+
+
 def validate_selection(document: Any, catalog: CatalogV3) -> dict[str, Any]:
     expected = {
         "schemaVersion", "catalogSha256", "catalogRelease", "selectedLeafIds",
@@ -266,11 +306,12 @@ def leaf_status(leaf: Leaf) -> tuple[str, str | None]:
 def expand_selection(document: Any, catalog: CatalogV3) -> dict[str, Any]:
     selection = validate_selection(document, catalog)
     submitted = {item["id"]: item for item in selection["leaves"]}
+    final_leaf_ids = _expand_required_leaf_ids(selection["selectedLeafIds"], catalog)
     requirements: list[dict[str, Any]] = []
     targets: set[str] = set()
     pending: list[str] = []
     unsupported: list[str] = []
-    for leaf_id in selection["selectedLeafIds"]:
+    for leaf_id in final_leaf_ids:
         leaf = catalog.leaves[leaf_id]
         status, reason = leaf_status(leaf)
         packages = list(leaf.package_targets) if status == "ready" else []
@@ -282,8 +323,8 @@ def expand_selection(document: Any, catalog: CatalogV3) -> dict[str, Any]:
         requirements.append({
             "id": leaf.id,
             "kind": leaf.kind,
-            "requestedBy": submitted[leaf_id]["requestedBy"],
-            "provenance": submitted[leaf_id]["provenance"],
+            "requestedBy": submitted.get(leaf_id, {}).get("requestedBy", []),
+            "provenance": submitted.get(leaf_id, {}).get("provenance", ["required"]),
             "provider": leaf.provider,
             "source": leaf.source,
             "packageTargets": packages,
@@ -291,13 +332,13 @@ def expand_selection(document: Any, catalog: CatalogV3) -> dict[str, Any]:
             "reason": reason,
         })
     return {
-        "finalLeafIds": list(selection["selectedLeafIds"]),
+        "finalLeafIds": final_leaf_ids,
         "selectedBundleIds": list(selection["selectedBundleIds"]),
         "leafRequirements": requirements,
-        "providerRequirements": list(selection["providerRequirements"]),
-        "sourceRequirements": list(selection["sourceRequirements"]),
+        "providerRequirements": sorted({catalog.leaves[leaf_id].provider for leaf_id in final_leaf_ids}),
+        "sourceRequirements": sorted({catalog.leaves[leaf_id].source for leaf_id in final_leaf_ids}),
         "pendingItems": pending,
         "unsupportedItems": unsupported,
         "directPackageTargets": sorted(targets),
-        "networkRequired": any(catalog.leaves[leaf_id].network_required for leaf_id in selection["selectedLeafIds"]),
+        "networkRequired": any(catalog.leaves[leaf_id].network_required for leaf_id in final_leaf_ids),
     }

@@ -19,6 +19,7 @@ from linxira_components.backend import DEFAULT_CATALOG_PATH, apply_transaction  
 from linxira_components.catalog import load_catalog  # noqa: E402
 from linxira_components.cli import main  # noqa: E402
 from linxira_components.errors import CatalogDriftError, CatalogError, ValidationError  # noqa: E402
+from linxira_components.inventory import collect_inventory  # noqa: E402
 from linxira_components.models import create_confirmation, create_request_plan  # noqa: E402
 from linxira_components.selection import create_bundle_selection, expand_selection  # noqa: E402
 
@@ -304,6 +305,94 @@ class CatalogV3Tests(V3Fixture):
         self.assertEqual(runtime["provider"], "pacman")
         self.assertEqual(runtime["source"], "arch")
 
+    def test_v3_plan_expands_required_leaf_dependencies(self) -> None:
+        document = catalog_document()
+        document["applications"][0]["requires"] = ["python-runtime"]
+        document["bundles"] = [{
+            "id": "application-only",
+            "selection": "preset",
+            "children": {"required": ["haruna"], "recommended": [], "optional": []},
+        }]
+        self.write_catalog(document)
+        catalog = load_catalog(self.catalog_path, "x86_64")
+        selection = create_bundle_selection(catalog, "application-only")
+        plan = create_request_plan(catalog, [], "x86_64", selection=selection, clock=lambda: NOW)
+
+        self.assertEqual(plan["finalLeafIds"], ["haruna", "python-runtime"])
+        self.assertEqual(plan["directPackageTargets"], ["haruna", "python"])
+        dependency = next(item for item in plan["leafRequirements"] if item["id"] == "python-runtime")
+        self.assertEqual(dependency["provenance"], ["required"])
+
+    def test_inventory_reports_partial_pacman_cohort_and_receipt_provenance(self) -> None:
+        document = catalog_document()
+        document["components"][0]["artifact"]["ids"] = ["python", "python-pip"]
+        self.write_catalog(document)
+        catalog = load_catalog(self.catalog_path, "x86_64")
+        receipts = self.directory / "receipts"
+        receipts.mkdir()
+        (receipts / "managed.json").write_text(json.dumps({
+            "status": "succeeded", "catalogSha256": catalog.sha256,
+            "leafRequirements": [{"id": "python-runtime", "status": "ready"}],
+        }), encoding="utf-8")
+        result = subprocess.CompletedProcess([], 0, "python\n", "")
+        with mock.patch("linxira_components.inventory.shutil.which", return_value="/usr/bin/pacman"):
+            inventory = collect_inventory(catalog, receipt_dir=receipts, runner=mock.Mock(return_value=result))
+
+        runtime = inventory["leaves"]["python-runtime"]
+        self.assertEqual(runtime["state"], "partial")
+        self.assertEqual(runtime["installedPackageTargets"], ["python"])
+        self.assertEqual(runtime["missingPackageTargets"], ["python-pip"])
+        self.assertTrue(runtime["managed"])
+        self.assertEqual(inventory["leaves"]["conda-env"]["state"], "unknown")
+
+    def test_inventory_resolves_real_pacman_group_members_once(self) -> None:
+        document = catalog_document()
+        document["components"][0]["artifact"] = {
+            "type": "package-group", "ids": ["base-devel"],
+        }
+        self.write_catalog(document)
+        catalog = load_catalog(self.catalog_path, "x86_64")
+        runner = mock.Mock(side_effect=[
+            subprocess.CompletedProcess([], 0, "gcc\nmake\n", ""),
+            subprocess.CompletedProcess([], 0, "base-devel gcc\nbase-devel make\n", ""),
+        ])
+        with mock.patch("linxira_components.inventory.shutil.which", return_value="/usr/bin/pacman"):
+            inventory = collect_inventory(catalog, runner=runner)
+
+        runtime = inventory["leaves"]["python-runtime"]
+        self.assertEqual(runtime["state"], "installed")
+        self.assertEqual(runtime["installedPackageTargets"], ["base-devel"])
+        self.assertEqual(runner.call_count, 2)
+
+    def test_v3_plan_and_confirmation_contain_only_missing_package_delta(self) -> None:
+        selection = create_bundle_selection(self.catalog, "workstation")
+        plan = create_request_plan(
+            self.catalog, [], "x86_64", selection=selection,
+            installed_package_targets={"python"}, clock=lambda: NOW,
+        )
+        self.assertEqual(plan["directPackageTargets"], ["haruna"])
+        self.assertEqual(plan["executionPackageTargets"], ["haruna", "python"])
+        runtime = next(item for item in plan["leafRequirements"] if item["id"] == "python-runtime")
+        self.assertEqual(runtime["packageTargets"], [])
+        confirmation = create_confirmation(
+            plan, self.catalog, installed_package_targets={"python"}, clock=lambda: NOW,
+        )
+        self.assertEqual(confirmation["directPackageTargets"], ["haruna"])
+        self.assertEqual(confirmation["executionPackageTargets"], ["haruna", "python"])
+
+        for schema_name, document in (
+            ("request-plan-v2.schema.json", plan),
+            ("confirmation-v2.schema.json", confirmation),
+        ):
+            schema = json.loads(
+                (Path(__file__).parents[1] / "src/linxira_components/schemas" / schema_name).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertIn("executionPackageTargets", schema["required"])
+            self.assertIn("executionPackageTargets", schema["properties"])
+            self.assertTrue(set(document).issubset(set(schema["properties"])))
+
     def test_unavailable_leaf_is_recorded_as_pending(self) -> None:
         self.catalog.leaves["aur-tool"] = replace(
             self.catalog.leaves["aur-tool"], available=False, unavailable_reason="review pending"
@@ -401,6 +490,14 @@ class BackendV3Tests(V3Fixture):
         self.assertFalse(runner.call_args.kwargs["shell"])
         self.assertEqual(receipt["schemaVersion"], "org.linxira.components.receipt.v2")
         self.assertEqual(receipt["finalLeafIds"], plan["finalLeafIds"])
+        self.assertEqual(receipt["executionPackageTargets"], ["haruna", "python"])
+        receipt_schema = json.loads(
+            (Path(__file__).parents[1] / "src/linxira_components/schemas/receipt-v2.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertIn("executionPackageTargets", receipt_schema["required"])
+        self.assertTrue(set(receipt).issubset(set(receipt_schema["properties"])))
         self.assertEqual(receipt["pendingItems"], ["aur-tool", "conda-env", "configure-env"])
         self.assertEqual(receipt["unsupportedItems"], ["flatpak-tool"])
 
@@ -413,7 +510,7 @@ class BackendV3Tests(V3Fixture):
 
         confirmation["digest"] = document_digest(confirmation)
         runner = mock.Mock()
-        with self.assertRaisesRegex(ValidationError, "selection expansion"):
+        with self.assertRaisesRegex(ValidationError, "package delta|selection expansion"):
             apply_transaction(
                 confirmation,
                 catalog_path=self.catalog_path,
@@ -422,6 +519,45 @@ class BackendV3Tests(V3Fixture):
                 runner=runner,
             )
         runner.assert_not_called()
+
+    def test_string_artifact_shorthand_keeps_package_type(self) -> None:
+        document = catalog_document()
+        document["components"][0]["artifact"] = "python"
+        self.write_catalog(document)
+        catalog = load_catalog(self.catalog_path, "x86_64")
+        runtime = catalog.leaves["python-runtime"]
+        self.assertEqual(runtime.artifact_type, "package")
+        self.assertEqual(runtime.package_targets, ("python",))
+
+    def test_apply_uses_full_catalog_targets_after_delta_revalidation(self) -> None:
+        selection = create_bundle_selection(self.catalog, "workstation")
+        plan = create_request_plan(
+            self.catalog, [], "x86_64", selection=selection,
+            installed_package_targets={"python"}, clock=lambda: NOW,
+        )
+        confirmation = create_confirmation(
+            plan, self.catalog, installed_package_targets={"python"}, clock=lambda: NOW,
+        )
+        calls = []
+
+        def runner(command, **kwargs):
+            calls.append(command)
+            if command[-1] == "-Qq":
+                return subprocess.CompletedProcess(command, 0, "python\n", "")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with mock.patch("linxira_components.inventory.shutil.which", return_value="/usr/bin/pacman"):
+            apply_transaction(
+                confirmation,
+                catalog_path=self.catalog_path,
+                receipt_dir=self.directory / "receipts",
+                effective_uid=0,
+                runner=runner,
+            )
+        self.assertEqual(
+            calls[-1],
+            ["pacman", "--sync", "--needed", "--noconfirm", "--", "haruna", "python"],
+        )
 
     def test_pending_only_selection_does_not_execute_a_command(self) -> None:
         document = catalog_document()

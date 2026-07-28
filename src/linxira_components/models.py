@@ -10,6 +10,7 @@ from .catalog import Catalog, ID_RE, PACKAGE_RE
 from .catalog_v3 import CatalogV3, STABLE_ID_RE
 from .errors import CatalogDriftError, DigestError, InvalidTransitionError, ValidationError
 from .jsonio import document_digest
+from .inventory import reconcile_package_delta
 from .selection import expand_selection, required_license_acceptances
 
 
@@ -81,6 +82,7 @@ def create_request_plan(
     license_acceptances: list[str] | tuple[str, ...] = (),
     clock: Clock = utc_now,
     id_factory: Callable[[], Any] = uuid4,
+    installed_package_targets: set[str] | None = None,
 ) -> dict[str, Any]:
     if architecture != catalog.architecture:
         raise ValidationError("plan architecture differs from the validated catalog architecture")
@@ -90,6 +92,10 @@ def create_request_plan(
         if selection is None:
             raise ValidationError("Catalog v3 planning requires a selection document")
         expanded = expand_selection(selection, catalog)
+        execution_package_targets = list(expanded["directPackageTargets"])
+        if installed_package_targets is not None:
+            expanded = reconcile_package_delta(expanded, installed_package_targets)
+        expanded["executionPackageTargets"] = execution_package_targets
         accepted_license_ids = sorted(set(license_acceptances))
         required_acceptances = required_license_acceptances(catalog, expanded["finalLeafIds"])
         if accepted_license_ids != required_acceptances:
@@ -184,14 +190,14 @@ def validate_request_plan(document: Any, *, catalog_sha256: str | None = None) -
 V3_MATERIAL_FIELDS = {
     "selection", "finalLeafIds", "selectedBundleIds", "leafRequirements",
     "providerRequirements", "sourceRequirements", "pendingItems", "unsupportedItems",
-    "directPackageTargets", "acceptedLicenseIds", "networkRequired", "systemUpgradeRequired",
+    "directPackageTargets", "executionPackageTargets", "acceptedLicenseIds", "networkRequired", "systemUpgradeRequired",
 }
 
 
 def _validate_v3_material(document: dict[str, Any], *, context: str) -> None:
     for field_name in (
         "finalLeafIds", "selectedBundleIds", "providerRequirements", "sourceRequirements",
-        "pendingItems", "unsupportedItems", "directPackageTargets",
+        "pendingItems", "unsupportedItems", "directPackageTargets", "executionPackageTargets",
         "acceptedLicenseIds",
     ):
         values = document[field_name]
@@ -205,8 +211,10 @@ def _validate_v3_material(document: dict[str, Any], *, context: str) -> None:
         raise ValidationError(f"{context} contains an invalid stable ID")
     if not all(STABLE_ID_RE.fullmatch(value) for value in document["acceptedLicenseIds"]):
         raise ValidationError(f"{context} contains an invalid accepted license ID")
-    if not all(PACKAGE_RE.fullmatch(value) for value in document["directPackageTargets"]):
+    if not all(PACKAGE_RE.fullmatch(value) for value in document["directPackageTargets"] + document["executionPackageTargets"]):
         raise ValidationError(f"{context} contains an invalid package target")
+    if not set(document["directPackageTargets"]).issubset(document["executionPackageTargets"]):
+        raise ValidationError(f"{context} package delta exceeds execution package targets")
     if not isinstance(document["selection"], dict):
         raise ValidationError(f"{context} selection must be an object")
     requirements = document["leafRequirements"]
@@ -277,6 +285,7 @@ def create_confirmation(
     *,
     clock: Clock = utc_now,
     id_factory: Callable[[], Any] = uuid4,
+    installed_package_targets: set[str] | None = None,
 ) -> dict[str, Any]:
     validated = validate_request_plan(plan, catalog_sha256=catalog.sha256)
     if validated["architecture"] != catalog.architecture:
@@ -285,6 +294,10 @@ def create_confirmation(
         if validated["schemaVersion"] != PLAN_V2_SCHEMA:
             raise ValidationError("Catalog v3 requires a v2 request plan")
         expanded = expand_selection(validated["selection"], catalog)
+        execution_package_targets = list(expanded["directPackageTargets"])
+        if installed_package_targets is not None:
+            expanded = reconcile_package_delta(expanded, installed_package_targets)
+        expanded["executionPackageTargets"] = execution_package_targets
         for field_name, expected_value in expanded.items():
             if validated[field_name] != expected_value:
                 raise ValidationError(f"request plan {field_name} does not match Catalog v3 selection expansion")

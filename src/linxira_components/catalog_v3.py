@@ -23,11 +23,13 @@ class Leaf:
     kind: str
     provider: str
     source: str
+    artifact_type: str
     package_targets: tuple[str, ...]
     available: bool
     unavailable_reason: str
     network_required: bool
     requires_acceptance: bool
+    requires: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -181,6 +183,16 @@ def _parse_children(value: Any, context: str) -> tuple[ChildRef, ...]:
     return tuple(refs)
 
 
+def _parse_requires(value: Any, context: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise CatalogError(f"{context}.requires must be an ID array")
+    if len(value) != len(set(value)):
+        raise CatalogError(f"{context}.requires must contain unique IDs")
+    return tuple(_identifier(item, f"{context}.requires item") for item in value)
+
+
 def load_catalog_v3(path: str | Path, architecture: str) -> CatalogV3:
     catalog_path = Path(path)
     try:
@@ -231,7 +243,14 @@ def load_catalog_v3(path: str | Path, architecture: str) -> CatalogV3:
             available, reason, network_required = _parse_availability(
                 item.get("availability", True), f"{context}.availability", architecture
             )
+            artifact = item.get("artifact", {})
+            artifact_type = (
+                artifact.get("type", "operation" if kind == "operation" else "package")
+                if isinstance(artifact, dict)
+                else "package"
+            )
             packages = _parse_packages(item, context, leaf_id, provider)
+            requires = _parse_requires(item.get("requires", []), context)
             license_info = item.get("license", {})
             if license_info is not None and not isinstance(license_info, dict):
                 raise CatalogError(f"invalid {context}.license")
@@ -241,8 +260,8 @@ def load_catalog_v3(path: str | Path, architecture: str) -> CatalogV3:
             if kind == "operation" and packages:
                 raise CatalogError(f"{context} operation must not contain package targets")
             leaves[leaf_id] = Leaf(
-                leaf_id, kind, provider, source, packages, available, reason, network_required,
-                requires_acceptance
+                leaf_id, kind, provider, source, artifact_type, packages, available, reason, network_required,
+                requires_acceptance, requires
             )
 
     bundles: dict[str, Bundle] = {}
@@ -272,6 +291,12 @@ def load_catalog_v3(path: str | Path, architecture: str) -> CatalogV3:
         bundles[bundle_id] = Bundle(bundle_id, policy, max_selected, _parse_children(item.get("children"), f"{context}.children"))
 
     known = set(leaves) | set(bundles)
+    for leaf in leaves.values():
+        unknown = sorted(set(leaf.requires) - known)
+        if unknown:
+            raise CatalogError(
+                f"leaf {leaf.id} references unknown required IDs: {', '.join(unknown)}"
+            )
     referenced_bundles: set[str] = set()
     for bundle in bundles.values():
         unknown = sorted({child.id for child in bundle.children} - known)

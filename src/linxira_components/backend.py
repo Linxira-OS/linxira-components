@@ -10,6 +10,7 @@ from .catalog import load_catalog
 from .catalog_v3 import CatalogV3
 from .errors import TransactionError, ValidationError
 from .jsonio import atomic_write_json
+from .inventory import query_satisfied_package_targets, reconcile_package_delta
 from .models import Receipt, validate_confirmation
 from .selection import expand_selection, required_license_acceptances
 
@@ -68,11 +69,38 @@ def apply_transaction(
     validated = validate_confirmation(confirmation)
     catalog = load_catalog(catalog_path, validated["architecture"])
     validate_confirmation(validated, catalog_sha256=catalog.sha256)
+    uid = _effective_uid() if effective_uid is None else effective_uid
+    if uid != 0:
+        raise ValidationError("the transaction backend must run as root")
+    if not pacman or "/" in pacman or "\\" in pacman:
+        raise ValidationError("pacman executable must be a trusted bare command name")
     receipt_details: dict[str, Any] | None = None
     if isinstance(catalog, CatalogV3):
         if validated["schemaVersion"] != "org.linxira.components.confirmation.v2":
             raise ValidationError("Catalog v3 requires a v2 confirmation")
-        expanded = expand_selection(validated["selection"], catalog)
+        desired = expand_selection(validated["selection"], catalog)
+        for field_name, expected_value in desired.items():
+            if field_name not in {"directPackageTargets", "leafRequirements"} and validated[field_name] != expected_value:
+                raise ValidationError(f"confirmation {field_name} does not match Catalog v3 selection expansion")
+        desired_requirements = {item["id"]: item for item in desired["leafRequirements"]}
+        for item in validated["leafRequirements"]:
+            expected = desired_requirements.get(item.get("id"))
+            if expected is None or any(
+                item.get(field_name) != expected[field_name]
+                for field_name in expected if field_name != "packageTargets"
+            ) or not set(item.get("packageTargets", ())).issubset(expected["packageTargets"]):
+                raise ValidationError("confirmation leafRequirements do not match Catalog v3 selection expansion")
+        if not set(validated["directPackageTargets"]).issubset(desired["directPackageTargets"]):
+            raise ValidationError("confirmation directPackageTargets does not match Catalog v3 selection expansion")
+        if validated["executionPackageTargets"] != desired["directPackageTargets"]:
+            raise ValidationError("confirmation executionPackageTargets do not match Catalog v3 selection expansion")
+        expanded = desired if not desired["directPackageTargets"] else reconcile_package_delta(
+            desired,
+            query_satisfied_package_targets(
+                catalog, runner=runner, pacman=pacman, required=True
+            ) or set(),
+        )
+        expanded["executionPackageTargets"] = desired["directPackageTargets"]
         for field_name, expected_value in expanded.items():
             if validated[field_name] != expected_value:
                 raise ValidationError(f"confirmation {field_name} does not match Catalog v3 selection expansion")
@@ -92,8 +120,10 @@ def apply_transaction(
             "pendingItems": validated["pendingItems"],
             "unsupportedItems": validated["unsupportedItems"],
             "directPackageTargets": validated["directPackageTargets"],
+            "executionPackageTargets": validated["executionPackageTargets"],
             "acceptedLicenseIds": validated["acceptedLicenseIds"],
         }
+        execution_targets = validated["executionPackageTargets"]
     else:
         if validated["schemaVersion"] != "org.linxira.components.confirmation.v1":
             raise ValidationError("Catalog v2 requires a v1 confirmation")
@@ -105,12 +135,7 @@ def apply_transaction(
         )
         if validated["directPackageTargets"] != expected_targets:
             raise ValidationError("confirmation package targets do not match the current catalog profiles")
-    uid = _effective_uid() if effective_uid is None else effective_uid
-    if uid != 0:
-        raise ValidationError("the transaction backend must run as root")
-    if not pacman or "/" in pacman or "\\" in pacman:
-        raise ValidationError("pacman executable must be a trusted bare command name")
-
+        execution_targets = validated["directPackageTargets"]
     receipt = Receipt(
         request_plan_id=validated["requestPlanId"],
         plan_digest=validated["planDigest"],
@@ -123,7 +148,7 @@ def apply_transaction(
     receipt.transition("applying", message="Applying confirmed Arch package targets")
     _persist(receipt, receipt_dir_path)
 
-    if not validated["directPackageTargets"]:
+    if not execution_targets:
         receipt.transition("succeeded", message="No executable Arch package leaves; pending and unsupported items were not run")
         _persist(receipt, receipt_dir_path)
         return receipt.to_document()
@@ -134,7 +159,7 @@ def apply_transaction(
         "--needed",
         "--noconfirm",
         "--",
-        *validated["directPackageTargets"],
+        *execution_targets,
     )
     try:
         result = runner(
