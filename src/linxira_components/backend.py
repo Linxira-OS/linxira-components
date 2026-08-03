@@ -19,6 +19,43 @@ DEFAULT_RECEIPT_DIR = Path("/var/lib/linxira/components/receipts")
 DEFAULT_CATALOG_PATH = Path("/usr/share/linxira/catalog/catalog-v3.json")
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
+# Commands that own the pacman database lock while running.
+PACMAN_PROCESS_NAMES = frozenset({"pacman", "makepkg", "yay", "paru", "pikaur"})
+
+
+def _ensure_pacman_lock_available(
+    runner: Runner = subprocess.run, root: str | Path = "/"
+) -> None:
+    """Refuse to run when pacman is active; clear a stale db.lck otherwise.
+
+    pacman refuses to start while /var/lib/pacman/db.lck exists. The lock is
+    only valid while a pacman-like process is running; when none is, the lock
+    is stale (e.g. left behind by a crashed transaction) and is removed so the
+    component transaction can proceed.
+    """
+    lock = Path(root) / "var/lib/pacman/db.lck"
+    if not lock.exists():
+        return
+    for name in PACMAN_PROCESS_NAMES:
+        try:
+            probe = runner(
+                ["pgrep", "-x", name],
+                check=False,
+                capture_output=True,
+                text=True,
+                shell=False,
+            )
+        except OSError:
+            continue
+        if probe.returncode == 0:
+            raise TransactionError(
+                f"pacman is already running ({name}); wait for the transaction to finish and retry"
+            )
+    try:
+        lock.unlink()
+    except OSError as exc:
+        raise TransactionError(f"failed to remove stale pacman lock: {exc}") from exc
+
 
 def _effective_uid() -> int:
     return os.geteuid() if hasattr(os, "geteuid") else -1
@@ -156,11 +193,13 @@ def apply_transaction(
     command: Sequence[str] = (
         pacman,
         "--sync",
+        "--refresh",
         "--needed",
         "--noconfirm",
         "--",
         *execution_targets,
     )
+    _ensure_pacman_lock_available(runner)
     try:
         result = runner(
             list(command),

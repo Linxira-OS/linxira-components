@@ -489,7 +489,7 @@ class BackendV3Tests(V3Fixture):
         )
         self.assertEqual(
             runner.call_args.args[0],
-            ["pacman", "--sync", "--needed", "--noconfirm", "--", "haruna", "python"],
+            ["pacman", "--sync", "--refresh", "--needed", "--noconfirm", "--", "haruna", "python"],
         )
         self.assertFalse(runner.call_args.kwargs["shell"])
         self.assertEqual(receipt["schemaVersion"], "org.linxira.components.receipt.v2")
@@ -560,7 +560,7 @@ class BackendV3Tests(V3Fixture):
             )
         self.assertEqual(
             calls[-1],
-            ["pacman", "--sync", "--needed", "--noconfirm", "--", "haruna", "python"],
+            ["pacman", "--sync", "--refresh", "--needed", "--noconfirm", "--", "haruna", "python"],
         )
 
     def test_pending_only_selection_does_not_execute_a_command(self) -> None:

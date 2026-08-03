@@ -17,6 +17,7 @@ from uuid import UUID
 ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from linxira_components import backend  # noqa: E402
 from linxira_components.catalog import load_catalog  # noqa: E402
 from linxira_components.backend import apply_transaction  # noqa: E402
 from linxira_components.cli import main  # noqa: E402
@@ -388,6 +389,32 @@ class SafetyTests(CatalogFixture):
             )
         runner.assert_not_called()
 
+    def _make_pacman_lock(self) -> Path:
+        lock_dir = Path(self.directory) / "var/lib/pacman"
+        lock_dir.mkdir(parents=True)
+        lock = lock_dir / "db.lck"
+        lock.write_text("", encoding="utf-8")
+        return lock
+
+    def test_pacman_lock_absent_is_a_noop(self) -> None:
+        runner = mock.Mock(return_value=subprocess.CompletedProcess([], 1, "", ""))
+        backend._ensure_pacman_lock_available(runner, root=self.directory)
+        runner.assert_not_called()
+
+    def test_pacman_lock_with_active_process_raises_and_keeps_lock(self) -> None:
+        lock = self._make_pacman_lock()
+        runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "1234", ""))
+        with self.assertRaisesRegex(backend.TransactionError, "already running"):
+            backend._ensure_pacman_lock_available(runner, root=self.directory)
+        self.assertTrue(lock.exists())
+
+    def test_pacman_lock_stale_is_removed_when_no_process_running(self) -> None:
+        lock = self._make_pacman_lock()
+        runner = mock.Mock(return_value=subprocess.CompletedProcess([], 1, "", ""))
+        backend._ensure_pacman_lock_available(runner, root=self.directory)
+        self.assertFalse(lock.exists())
+        self.assertGreaterEqual(runner.call_count, 1)
+
     def test_apply_runs_fixed_pacman_argv_and_persists_succeeded_receipt(self) -> None:
         _, confirmation = self.confirmed()
         runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "installed", ""))
@@ -400,8 +427,11 @@ class SafetyTests(CatalogFixture):
         )
         self.assertEqual(receipt["status"], "succeeded")
         command = runner.call_args.args[0]
-        self.assertEqual(command[:5], ["pacman", "--sync", "--needed", "--noconfirm", "--"])
-        self.assertEqual(command[5:], ["git", "python", "python-numpy", "shared-tool"])
+        self.assertEqual(
+            command[:6],
+            ["pacman", "--sync", "--refresh", "--needed", "--noconfirm", "--"],
+        )
+        self.assertEqual(command[6:], ["git", "python", "python-numpy", "shared-tool"])
         self.assertFalse(runner.call_args.kwargs["shell"])
         self.assertEqual(runner.call_args.kwargs["env"], {"PATH": "/usr/bin:/usr/sbin", "LC_ALL": "C"})
         persisted = list((self.directory / "receipts").glob("*.json"))
@@ -432,7 +462,7 @@ class SafetyTests(CatalogFixture):
 
         self.assertEqual(
             runner.call_args.args[0],
-            ["pacman", "--sync", "--needed", "--noconfirm", "--", "haruna"],
+            ["pacman", "--sync", "--refresh", "--needed", "--noconfirm", "--", "haruna"],
         )
         self.assertEqual(receipt["status"], "succeeded")
         self.assertEqual(receipt["requestPlanId"], plan["id"])
@@ -468,6 +498,8 @@ class SafetyTests(CatalogFixture):
         link = self.directory / "linked.json"
         try:
             link.symlink_to(outside)
+            if not link.is_symlink():
+                self.skipTest("symlink became a junction on this Windows account")
         except (OSError, NotImplementedError):
             self.skipTest("symlinks are not available to this Windows account")
         with self.assertRaises(UnsafePathError):
