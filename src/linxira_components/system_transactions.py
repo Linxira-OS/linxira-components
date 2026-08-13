@@ -342,7 +342,7 @@ class SystemTransactionStore:
         return {"mount": mount, "checks": checks, "ready": mount is not None and all(checks.values())}
 
     def _hardware_driver_evidence(self) -> dict[str, Any]:
-        command = ["/usr/bin/linxira-chwd-detector"]
+        command = ["/usr/bin/linxira-hwd-detector"]
         try:
             environment = {"PATH": "/usr/bin", "LC_ALL": "C"}
             if self.runner is subprocess.run:
@@ -399,7 +399,7 @@ class SystemTransactionStore:
         if type(root["schema_version"]) is not int or root["schema_version"] != 1:
             raise ValidationError("hardware detector schema version is unsupported")
         metadata = exact(root["detector"], "metadata", {"name", "version", "upstream_chwd"})
-        if metadata["name"] != "linxira-chwd-detector":
+        if metadata["name"] != "linxira-hwd-detector":
             raise ValidationError("hardware detector identity is invalid")
         if not all(
             isinstance(metadata[key], str) and SEMVER_RE.fullmatch(metadata[key])

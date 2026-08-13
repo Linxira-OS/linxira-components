@@ -121,7 +121,7 @@ class SystemTransactionTests(unittest.TestCase):
     def test_hardware_diagnosis_uses_fixed_detector_and_strict_document(self):
         detector = {
             "schema_version": 1,
-            "detector": {"name": "linxira-chwd-detector", "version": "0.1.0", "upstream_chwd": "1.23.0"},
+            "detector": {"name": "linxira-hwd-detector", "version": "0.1.0", "upstream_chwd": "1.23.0"},
             "evidence": {
                 "pci": [{"bus_id": "0000:00:08.0", "class_id": "0300", "vendor_id": "1414", "device_id": "5353"}],
                 "dmi": {"system_vendor": "Microsoft Corporation", "product_name": "Virtual Machine", "chassis_type": "3"},
@@ -140,7 +140,7 @@ class SystemTransactionTests(unittest.TestCase):
         receipt = store.confirm_and_apply(plan["id"], plan["digest"], 1000)
         self.assertFalse(receipt["changed"])
         for call in runner.call_args_list:
-            self.assertEqual(call.args[0], ["/usr/bin/linxira-chwd-detector"])
+            self.assertEqual(call.args[0], ["/usr/bin/linxira-hwd-detector"])
             self.assertFalse(call.kwargs["shell"])
             self.assertEqual(call.kwargs["env"], {"PATH": "/usr/bin", "LC_ALL": "C"})
 
@@ -319,7 +319,7 @@ class SystemTransactionTests(unittest.TestCase):
         self.assertIn("requires verification", receipt["error"])
 
     def test_installed_hardware_detector_integration(self):
-        detector = Path("/usr/bin/linxira-chwd-detector")
+        detector = Path("/usr/bin/linxira-hwd-detector")
         if not detector.is_file() or not os.access(detector, os.X_OK):
             self.skipTest("installed Linxira hardware detector is unavailable")
         with tempfile.TemporaryDirectory() as directory:
