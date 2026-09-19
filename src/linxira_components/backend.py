@@ -112,6 +112,10 @@ def apply_transaction(
     if not pacman or "/" in pacman or "\\" in pacman:
         raise ValidationError("pacman executable must be a trusted bare command name")
     receipt_details: dict[str, Any] | None = None
+    # 已确认目标全部"镜像自带"（availability.networkRequired=False）时不刷新
+    # 同步库：装完 ISO 未联网的机器也必须能装离线应用；任一目标需要网络则
+    # 保持原行为（先 --refresh 再安装）。
+    needs_refresh = True
     if isinstance(catalog, CatalogV3):
         if validated["schemaVersion"] != "org.linxira.components.confirmation.v2":
             raise ValidationError("Catalog v3 requires a v2 confirmation")
@@ -161,6 +165,11 @@ def apply_transaction(
             "acceptedLicenseIds": validated["acceptedLicenseIds"],
         }
         execution_targets = validated["executionPackageTargets"]
+        needs_refresh = any(
+            item.get("id") not in catalog.leaves
+            or catalog.leaves[item["id"]].network_required
+            for item in validated["leafRequirements"]
+        )
     else:
         if validated["schemaVersion"] != "org.linxira.components.confirmation.v1":
             raise ValidationError("Catalog v2 requires a v1 confirmation")
@@ -173,6 +182,9 @@ def apply_transaction(
         if validated["directPackageTargets"] != expected_targets:
             raise ValidationError("confirmation package targets do not match the current catalog profiles")
         execution_targets = validated["directPackageTargets"]
+        needs_refresh = any(
+            entry.network_required for entry in (*profiles, *applications)
+        )
     receipt = Receipt(
         request_plan_id=validated["requestPlanId"],
         plan_digest=validated["planDigest"],
@@ -182,7 +194,11 @@ def apply_transaction(
     _persist(receipt, receipt_dir_path)
     receipt.transition("confirmed", message="Confirmation accepted")
     _persist(receipt, receipt_dir_path)
-    receipt.transition("applying", message="Applying confirmed Arch package targets")
+    receipt.transition(
+        "applying",
+        message="Applying confirmed Arch package targets"
+        + ("" if needs_refresh else " (offline targets; package databases not refreshed)"),
+    )
     _persist(receipt, receipt_dir_path)
 
     if not execution_targets:
@@ -190,10 +206,12 @@ def apply_transaction(
         _persist(receipt, receipt_dir_path)
         return receipt.to_document()
 
+    sync_arguments: list[str] = ["--sync"]
+    if needs_refresh:
+        sync_arguments.append("--refresh")
     command: Sequence[str] = (
         pacman,
-        "--sync",
-        "--refresh",
+        *sync_arguments,
         "--needed",
         "--noconfirm",
         "--",

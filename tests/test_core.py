@@ -438,6 +438,29 @@ class SafetyTests(CatalogFixture):
         self.assertEqual(len(persisted), 1)
         self.assertEqual(json.loads(persisted[0].read_text(encoding="utf-8"))["status"], "succeeded")
 
+    def test_apply_offline_targets_skip_sync_refresh(self) -> None:
+        # science profile 的 availability.networkRequired=False（镜像自带）：
+        # 全离线目标不刷新同步库，装完 ISO 未联网也必须能装。
+        catalog = self.load()
+        plan = create_request_plan(catalog, ["science"], "x86_64", clock=lambda: NOW)
+        confirmation = create_confirmation(plan, catalog, clock=lambda: NOW)
+        runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "installed", ""))
+        receipt = apply_transaction(
+            confirmation,
+            receipt_dir=self.directory / "receipts",
+            catalog_path=self.catalog_path,
+            effective_uid=0,
+            runner=runner,
+        )
+        self.assertEqual(receipt["status"], "succeeded")
+        command = runner.call_args.args[0]
+        self.assertEqual(
+            command[:5],
+            ["pacman", "--sync", "--needed", "--noconfirm", "--"],
+        )
+        self.assertNotIn("--refresh", command)
+        self.assertEqual(command[5:], ["python-numpy", "shared-tool"])
+
     def test_apply_application_only_transaction_and_persists_receipt(self) -> None:
         catalog = self.load()
         plan = create_request_plan(
