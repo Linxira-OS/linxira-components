@@ -1,0 +1,30 @@
+name: Release on version bump
+
+# VERSION 文件变更(或手动触发) => 若对应 tag 的 Release 不存在则自动创建。
+# [linxira] 包仓库的 auto-bump 每日扫描正式 Release 并自动 bump/合并/发布。
+on:
+  push:
+    branches: [main]
+    paths: ["VERSION"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release if tag missing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ver=$(tr -d '[:space:]' < VERSION)
+          tag="v${ver}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $tag already exists; nothing to do"
+            exit 0
+          fi
+          gh release create "$tag" --target "$GITHUB_SHA" --title "$tag" \
+            --notes "Automated release for version ${ver} (VERSION file bump)."
