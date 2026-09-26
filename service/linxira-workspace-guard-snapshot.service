@@ -1,0 +1,20 @@
+[Unit]
+Description=Linxira workspace guard snapshot
+Documentation=https://github.com/Linxira-OS/linxira-components
+ConditionPathExists=/etc/linxira/workspace-guard.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/linxira-components-guard-timer
+User=root
+Group=root
+UMask=0077
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectSystem=full
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+TimeoutStartSec=2h

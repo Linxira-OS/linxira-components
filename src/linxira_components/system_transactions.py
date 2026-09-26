@@ -21,7 +21,7 @@ from .jsonio import document_digest
 
 PLAN_SCHEMA = "org.linxira.components.system-plan.v1"
 RECEIPT_SCHEMA = "org.linxira.components.system-receipt.v1"
-REGISTRY_VERSION = "2026.07.22.4"
+REGISTRY_VERSION = "2026.09.26.1"
 PACMAN_PROCESSES = frozenset({"pacman", "makepkg", "yay", "paru", "pikaur", "packagekitd"})
 OPERATIONS = {
     "org.linxira.recovery.pacman-lock-diagnose.v1": {
@@ -59,6 +59,20 @@ OPERATIONS = {
         "lockDomain": "system-packages",
         "risk": "system-change-reboot-possible",
         "rollback": "pre-change-timeshift-snapshot-separate-restore-authorization",
+    },
+    "org.linxira.guard.create-workspace-snapshot.v1": {
+        "action": "org.linxira.components.recovery",
+        "lockDomain": "workspace-guard",
+        # 不是 read-only: confirm_and_apply 见到 read-only 会跳过 worker 直接开凭据,
+        # 快照就永远不会生成。守护不碰工作区, 但确实要执行。
+        "risk": "guard-store-write-no-workspace-change",
+        "rollback": "snapshot-can-be-pruned-no-rollback-needed",
+    },
+    "org.linxira.guard.restore-workspace-snapshot.v1": {
+        "action": "org.linxira.components.recovery",
+        "lockDomain": "workspace-guard",
+        "risk": "workspace-copy-no-in-place-overwrite",
+        "rollback": "restore-target-is-a-new-directory-nothing-to-roll-back",
     },
 }
 REGISTRY_DIGEST = hashlib.sha256(
@@ -121,6 +135,19 @@ def _read_text(path: Path, limit: int = 4096) -> str:
     except OSError:
         return ""
 
+
+
+def _validate_worker_result(result: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+    """按操作族分派结果校验。guest 的校验断言 timeshift 快照身份, 对守护没有意义。"""
+    from .driver_worker import GUEST_SPECS, validate_result
+    from .guard_worker import GUARD_OPERATIONS
+
+    operation_id = str(plan.get("operationId"))
+    if operation_id in GUARD_OPERATIONS:
+        from .guard_worker import validate_guard_result
+
+        return validate_guard_result(result, plan)
+    return validate_result(result, plan)
 
 def _bounded_process(command: list[str], *, limit: int, timeout: int, env: dict[str, str]):
     process = subprocess.Popen(
@@ -502,6 +529,9 @@ class SystemTransactionStore:
             return self._live_readiness_evidence()
         if operation_id == "org.linxira.hardware.driver-state-diagnose.v1":
             return self._hardware_driver_evidence()
+        from .guard_worker import GUARD_OPERATIONS
+        if operation_id in GUARD_OPERATIONS:
+            return self._workspace_guard_evidence()
         from .driver_worker import GUEST_SPECS, collect_guest_prestate
         if operation_id in GUEST_SPECS:
             return collect_guest_prestate(
@@ -509,6 +539,36 @@ class SystemTransactionStore:
                 self._pacman_lock_evidence(), GUEST_SPECS[operation_id],
             )
         raise ValidationError(f"unsupported system operation: {operation_id}")
+
+    def _workspace_guard_evidence(self) -> dict[str, Any]:
+        """只采不随 restore 改变的量: 快照数、时间戳、剩余空间都会变, 放进 preState
+        会让漂移检查必然失败。"""
+        from . import guard_store
+
+        empty = {"configured": False, "store_mode_ok": False, "workspaces": []}
+        try:
+            config = guard_store.read_config(str(self._system_path(guard_store.CONFIG_PATH)))
+        except ValidationError:
+            return empty
+        if not config.get("configured"):
+            return empty
+        store = self._system_path(config["store"])
+        try:
+            metadata = store.stat()
+            mode_ok = stat.S_ISDIR(metadata.st_mode) and not stat.S_IMODE(metadata.st_mode) & 0o077
+        except OSError:
+            mode_ok = False
+        workspaces = []
+        for directory in sorted(store.glob("workspaces/*")):
+            if not directory.is_dir() or directory.is_symlink():
+                continue
+            try:
+                document = json.loads((directory / guard_store.REGISTERED_NAME).read_text(encoding="utf-8"))
+                path = str(document["workspace_path"])
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError):
+                continue
+            workspaces.append({"workspace_id": directory.name, "workspace_path": path})
+        return {"configured": True, "store_mode_ok": mode_ok, "workspaces": workspaces}
 
     def _path(self, collection: str, identifier: str) -> Path:
         try:
@@ -808,8 +868,7 @@ class SystemTransactionStore:
                     raise ValidationError("isolated system worker is unavailable")
                 try:
                     result = self.mutation_executor(plan)
-                    from .driver_worker import validate_result
-                    result = validate_result(result, plan)
+                    result = _validate_worker_result(result, plan)
                 except Exception:
                     self._replace(state_path, {
                         "id": plan_id, "status": "failed", "updatedAt": _timestamp(self.clock()),
@@ -887,17 +946,22 @@ class SystemTransactionStore:
 
     def execute_worker(self, plan_id: str) -> dict[str, Any]:
         from .driver_worker import GUEST_SPECS, apply_guest
+        from .guard_worker import GUARD_OPERATIONS
         plan = self._load(self._path("plans", plan_id))
         state = self._load(self._path("state", plan_id))
-        spec = GUEST_SPECS.get(str(plan.get("operationId")))
+        operation_id = str(plan.get("operationId"))
+        spec = GUEST_SPECS.get(operation_id)
+        guard = GUARD_OPERATIONS.get(operation_id)
         if (
             plan.get("schemaVersion") != PLAN_SCHEMA or plan.get("digest") != document_digest(plan)
-            or spec is None or state.get("status") != "applying"
+            or (spec is None and guard is None) or state.get("status") != "applying"
         ):
             raise ValidationError("worker plan or state is invalid")
         for key, value in self._binding().items():
             if plan.get(key) != value:
                 raise ValidationError(f"worker plan is stale: {key} changed")
+        if spec is None:
+            return self._execute_guard_worker(plan, plan_id, guard)
         current = self._evidence(spec.operation_id)
         if current != plan.get("preState"):
             raise ValidationError("system state changed before isolated driver apply")
@@ -918,6 +982,18 @@ class SystemTransactionStore:
         self._write_new(self._path("worker-results", plan_id), result)
         from .driver_worker import validate_result
         validate_result(result, plan)
+        self._finalize_mutation(plan, result)
+        return result
+
+    def _execute_guard_worker(self, plan: dict[str, Any], plan_id: str, guard) -> dict[str, Any]:
+        """守护不建 timeshift 快照, 也不需要 worker-progress: 失败时最多多一份
+        可以 prune 掉的快照, 没有系统变更要回滚。"""
+        from .guard_worker import validate_guard_result
+
+        result = guard(plan, self._run_fixed, lambda: self._evidence(str(plan["operationId"])))
+        result["digest"] = document_digest(result)
+        self._write_new(self._path("worker-results", plan_id), result)
+        validate_guard_result(result, plan)
         self._finalize_mutation(plan, result)
         return result
 

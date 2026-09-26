@@ -1,0 +1,12 @@
+[Unit]
+Description=Snapshot registered workspaces every 30 minutes
+Documentation=https://github.com/Linxira-OS/linxira-components
+
+[Timer]
+OnCalendar=*:0/30
+Persistent=true
+RandomizedDelaySec=5min
+Unit=linxira-workspace-guard-snapshot.service
+
+[Install]
+WantedBy=timers.target
