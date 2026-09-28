@@ -137,8 +137,13 @@ def _parse_packages(item: dict[str, Any], context: str, leaf_id: str, provider: 
                 raise CatalogError(f"{context}.artifact must contain exactly type and ids")
             if artifact["type"] not in {"package", "package-group", "operation"}:
                 raise CatalogError(f"invalid {context}.artifact.type")
-            if not isinstance(artifact["ids"], list) or not artifact["ids"]:
-                raise CatalogError(f"{context}.artifact.ids must be a non-empty array")
+            # schema(catalog-v3) 自 0516e10 起 minItems:0 —— server 类桌面
+            # 刻意零包。校验器必须与 schema 一致, 否则整个 catalog 无法通过
+            # plan 校验(实测事故: desktops[13] 卡死全部组件安装, GUI 同样受影响)。
+            if not isinstance(artifact["ids"], list):
+                raise CatalogError(f"{context}.artifact.ids must be an array")
+            if len(set(artifact["ids"])) != len(artifact["ids"]):
+                raise CatalogError(f"{context}.artifact.ids must be unique")
             values = [] if artifact["type"] == "operation" else artifact["ids"]
         else:
             raise CatalogError(f"invalid {context}.artifact")

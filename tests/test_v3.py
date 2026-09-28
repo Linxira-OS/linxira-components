@@ -533,6 +533,28 @@ class BackendV3Tests(V3Fixture):
         self.assertEqual(runtime.artifact_type, "package")
         self.assertEqual(runtime.package_targets, ("python",))
 
+    def test_empty_artifact_ids_allowed_matching_schema(self) -> None:
+        """schema 的 artifact.ids minItems:0(server 类桌面零包)——校验器必须放行。
+
+        回归: 此前校验器要求非空, 导致携带 desktop-server(空 ids)的真 catalog
+        整体无法通过 plan, GUI/agent/CLI 组件安装全被卡死。
+        """
+        document = catalog_document()
+        document["components"][0]["artifact"] = {"type": "package", "ids": []}
+        self.write_catalog(document)
+        catalog = load_catalog(self.catalog_path, "x86_64")
+        runtime = catalog.leaves["python-runtime"]
+        self.assertEqual(runtime.package_targets, ())
+
+    def test_duplicate_artifact_ids_rejected(self) -> None:
+        document = catalog_document()
+        document["components"][0]["artifact"] = {
+            "type": "package", "ids": ["python", "python"],
+        }
+        self.write_catalog(document)
+        with self.assertRaises(CatalogError):
+            load_catalog(self.catalog_path, "x86_64")
+
     def test_apply_uses_full_catalog_targets_after_delta_revalidation(self) -> None:
         selection = create_bundle_selection(self.catalog, "workstation")
         plan = create_request_plan(
