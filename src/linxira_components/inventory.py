@@ -13,6 +13,10 @@ from .errors import ValidationError
 
 
 INVENTORY_SCHEMA = "org.linxira.components.installed-state.v1"
+# Providers whose transactional install is not implemented yet: their leaves are
+# reported as "pending" (matching the selection layer) instead of a misleading
+# "unknown" that implied a broken package query.
+_PENDING_PROVIDERS = frozenset({"aur", "conda", "pip"})
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
@@ -184,7 +188,9 @@ def collect_inventory(
             }
             for leaf in catalog.leaves.values()
             for state, present, missing in [
-                _cohort_state(
+                ("pending", [], list(leaf.package_targets))
+                if leaf.provider in _PENDING_PROVIDERS
+                else _cohort_state(
                     leaf.package_targets,
                     reconciled if leaf.provider == "pacman" and leaf.source == "arch" else None,
                 )

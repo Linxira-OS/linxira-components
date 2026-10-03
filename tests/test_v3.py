@@ -344,7 +344,10 @@ class CatalogV3Tests(V3Fixture):
         self.assertEqual(runtime["installedPackageTargets"], ["python"])
         self.assertEqual(runtime["missingPackageTargets"], ["python-pip"])
         self.assertTrue(runtime["managed"])
-        self.assertEqual(inventory["leaves"]["conda-env"]["state"], "unknown")
+        self.assertEqual(inventory["leaves"]["conda-env"]["state"], "pending")
+        # pending provider 不经 pacman 分发: 无 installed/missing 包目标
+        self.assertEqual(inventory["leaves"]["conda-env"]["installedPackageTargets"], [])
+        self.assertEqual(inventory["leaves"]["conda-env"]["missingPackageTargets"], [])
 
     def test_inventory_resolves_real_pacman_group_members_once(self) -> None:
         document = catalog_document()
