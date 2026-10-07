@@ -16,21 +16,18 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - name: version sync (VERSION vs pyproject)
+        run: |
+          v=$(tr -d '[:space:]' < VERSION)
+          grep -q "version = \"${v}\"" pyproject.toml || {
+            echo "pyproject.toml version != VERSION (${v})"; exit 1; }
+
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
       - name: Compile Python sources
         run: python -m compileall -q src tests
       - name: Build wheel
-        run: python -m pip wheel --no-deps --wheel-dir dist .      - uses: actions/checkout@v4
-
-      - name: version sync (VERSION vs pyproject)
-        run: |
-          v=$(tr -d '[:space:]' < VERSION)
-          grep -q "version = \"${v}\"" pyproject.toml || {
-            echo "pyproject.toml version != VERSION (${v})"; exit 1; }es: [main]
-  pull_request:
-    branches: [main]
-
+        run: python -m pip wheel --no-deps --wheel-dir dist .
 permissions:
   contents: read
 
